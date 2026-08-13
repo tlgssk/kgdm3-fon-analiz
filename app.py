@@ -15,13 +15,13 @@ from openpyxl.utils import get_column_letter
 st.set_page_config(page_title="KGDM-3 Fon Analiz Otomasyonu", page_icon="📊", layout="wide")
 
 st.title("📊 KGDM-3 Fon Analiz ve Excel Otomasyonu")
-st.caption("TEFAS merkezli veri şelalesi kullanarak fonları analiz eder, KGDM-3 puanı üretir ve güncel Excel dosyası oluşturur.")
+st.caption("Farklı kaynaklardan şelale (waterfall) mantığıyla veri çekerek fonları analiz eder ve KGDM-3 puanı üretir.")
 
 FUND_KINDS = ("YAT", "EMK", "BYF")
 LOOKBACK_CALENDAR_DAYS = 35
 TARGET_TRADING_DAYS = 10
 HTTP_TIMEOUT = 8
-APP_VERSION = "3.0.0"
+APP_VERSION = "3.0.1"
 
 COLOR_NAVY = "1F4E79"
 COLOR_GREEN = "008000"
@@ -433,21 +433,21 @@ start_date = today - dt.timedelta(days=LOOKBACK_CALENDAR_DAYS)
 with st.spinner("🔄 TEFAS verileri çekiliyor..."):
     universe = fetch_tefas_universe(start_date, today)
 
+# HATA BURADAYDI! `st.stop()` kaldırıldı ve sadece bilgi verildi.
 if universe.empty:
-    st.error("TEFAS verisi alınamadı.\n\nKontrol edin:\n- pytefas kurulu mu?\n- İnternet bağlantısı var mı?\n- TEFAS API erişilebilir mi?\n- pytefas güncel mi?\n\nKurulum:\npip install -U pytefas")
-    st.stop()
+    st.warning("⚠️ Ana veri kaynağı olan TEFAS'a (pytefas) erişilemedi veya kütüphane kurulu değil. Yedek kaynaklar (İş Yatırım, Fintables) ile analiz devam ediyor...")
 
-available_codes = set(universe["code"].astype(str).str.upper().unique())
+available_codes = set(universe["code"].astype(str).str.upper().unique()) if not universe.empty else set()
 found_in_tefas = [code for code in requested_codes if code in available_codes]
 missing_from_tefas = [code for code in requested_codes if code not in available_codes]
 
 col1, col2, col3 = st.columns(3)
 with col1: st.metric("TEFAS'ta Bulunan", len(found_in_tefas))
-with col2: st.metric("TEFAS'ta Bulunamayan", len(missing_from_tefas))
+with col2: st.metric("Yedek Kaynağa Kalan", len(missing_from_tefas))
 with col3: st.metric("TEFAS Kayıt Sayısı", len(universe))
 
 if missing_from_tefas:
-    with st.expander("⚠️ TEFAS'ta bulunamayan fonlar"): st.write(", ".join(missing_from_tefas))
+    with st.expander("⚠️ TEFAS'ta bulunamayan fonlar (Yedek aranıyor)"): st.write(", ".join(missing_from_tefas))
 
 calculated_funds = []
 source_errors = []
@@ -485,7 +485,7 @@ for index, code in enumerate(requested_codes, start=1):
 progress.empty()
 
 if not calculated_funds:
-    st.error("Hiçbir fon hesaplanamadı.\n\nMuhtemel nedenler:\n- Fon kodları hatalı.\n- TEFAS veri erişimi başarısız.\n- İş Yatırım fallback'i veri döndürmedi.\n- Fintables veri yapısı değişmiş.\n- Fon için yeterli işlem günü bulunamadı.")
+    st.error("Hiçbir fon hesaplanamadı.\n\nMuhtemel nedenler:\n- Fon kodları hatalı.\n- TEFAS ve Yedek Kaynaklar (İş Yatırım, Fintables) veri döndürmedi.\n- Fon için yeterli işlem günü bulunamadı.")
     if source_errors:
         st.subheader("Hata Detayları")
         st.dataframe(pd.DataFrame(source_errors), use_container_width=True)
