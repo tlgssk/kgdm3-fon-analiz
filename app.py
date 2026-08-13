@@ -1,4 +1,3 @@
-ChatGPT:
 import datetime as dt
 import io
 import re
