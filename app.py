@@ -15,7 +15,7 @@ st.set_page_config(
 st.title('📊 KGDM-3 Fon Analiz ve Excel Otomasyonu')
 st.caption(
     'Fon_Listesi sayfasındaki fonları tamamlar, TEFAS API engellerine karşı yedek'
-    ' sistemle çalışır, skorları ve % getirileri renkli olarak ekrana yansıtır.'
+    ' sistemle çalışır, skorları (tam sayı olarak) ve % getirileri renkli ekrana yansıtır.'
 )
 
 # 1. KAPSAMLI TEFAS RESMİ VERİTABANI VE YEDEK (FALLBACK) GETİRİLER
@@ -134,7 +134,9 @@ if uploaded_file is not None:
     calculated_funds = []
     for item in user_funds:
       valor_ceza = item['valor'] * 1.5
-      kgdm_skor = round(item['kazrisk'] + item['makro'] - valor_ceza, 1)
+      
+      # KGDM Skorunu (Anlık) Tam Sayı Olarak Belirleme
+      kgdm_skor = int(round(item['kazrisk'] + item['makro'] - valor_ceza))
       raw_returns = item['daily_returns']
 
       if kgdm_skor >= 60:
@@ -146,14 +148,17 @@ if uploaded_file is not None:
       else:
         karar, karar_sira = 'ACİL SAT (<25 Puan)', 4
 
-      daily_scores = [0.0] * 10
-      daily_scores[-1] = kgdm_skor
+      # 10 Günlük Skor Eğrisi - TAM SAYI OLARAK KAYDEDİLİYOR
+      daily_scores_int = [0] * 10
+      daily_scores_int[-1] = kgdm_skor
+      running_score = float(kgdm_skor)
 
       for i in range(8, -1, -1):
         ret_val = raw_returns[i + 1]
         score_change = ret_val * 1.5
-        prev_score = daily_scores[i + 1] - score_change
-        daily_scores[i] = round(min(100, max(-50, prev_score)), 1)
+        running_score -= score_change
+        # Tabloda gösterilecek değer için yuvarlayıp int'e çeviriyoruz
+        daily_scores_int[i] = int(round(min(100.0, max(-50.0, running_score))))
 
       # Getirilerin Formatlanması (Pozitif, Negatif)
       price_pct_changes = [f'+%{ret:.2f}' if ret > 0 else f'-%{abs(ret):.2f}' if ret < 0 else '%0.00' for ret in raw_returns]
@@ -161,7 +166,7 @@ if uploaded_file is not None:
       calculated_funds.append({
           'code': item['kod'], 'name': item['adi'], 'valor': item['valor'],
           'kgdm_skor': kgdm_skor, 'karar': karar, 'karar_sira': karar_sira,
-          'daily_scores': daily_scores, 'price_pct_changes': price_pct_changes, 'aksiyon': item['aksiyon']
+          'daily_scores': daily_scores_int, 'price_pct_changes': price_pct_changes, 'aksiyon': item['aksiyon']
       })
 
     calculated_funds.sort(key=lambda x: (x['karar_sira'], -x['kgdm_skor']))
@@ -196,7 +201,6 @@ if uploaded_file is not None:
       ws_scores.append(row_data)
       scores_table_data.append(row_data)
 
-    # Düzeltilmiş Açık Renk Kodları
     green_font = Font(name='Calibri', bold=True, color='008000') # Yeşil
     red_font = Font(name='Calibri', bold=True, color='FF0000')   # Tam Kırmızı
     yellow_font = Font(name='Calibri', bold=True, color='B8860B') # Koyu Sarı / Nötr
@@ -222,7 +226,7 @@ if uploaded_file is not None:
     wb.save(output)
     output.seek(0)
 
-    st.success('✅ Eksi getiriler hem Streamlit ekranında hem de Excel dosyasında başarılı bir şekilde Kırmızıya boyandı!')
+    st.success('✅ Skorların tamamı tam sayılara dönüştürüldü ve tablo hatasız olarak güncellendi!')
 
     # EKRAN (STREAMLIT UI) İÇİN PANDAS STYLER RENKLENDİRMESİ
     df_display = pd.DataFrame(scores_table_data, columns=headers_scores)
@@ -237,11 +241,10 @@ if uploaded_file is not None:
             return 'color: #FF0000; font-weight: bold;'
         return ''
 
-    # Pandas versiyonuna uygun stil haritalama (.map() veya .applymap())
     try:
         styled_df = df_display.style.map(color_cells)
     except AttributeError:
         styled_df = df_display.style.applymap(color_cells)
 
     st.dataframe(styled_df, use_container_width=True)
-    st.download_button(label='📥 Tam Renkli Tabloyu İndir (fonlar_guncel.xlsx)', data=output, file_name='fonlar_guncel.xlsx', mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    st.download_button(label='📥 Tam Sayılı Tabloyu İndir (fonlar_guncel.xlsx)', data=output, file_name='fonlar_guncel.xlsx', mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
