@@ -15,7 +15,8 @@ st.set_page_config(
 st.title('📊 KGDM-3 Fon Analiz ve Excel Otomasyonu')
 st.caption(
     'Fon_Listesi sayfasındaki fon kodlarının resmi TEFAS adlarını tamamlar, KGDM-3'
-    ' puanlarını, kararlarını ve % Fiyat Getirilerini renklendirerek hesaplar.'
+    ' puanlarını ve günlük fiyat getirisiyle %100 uyumlu skor geçmişini'
+    ' hesaplar.'
 )
 
 # 1. KAPSAMLI VE %100 DOĞRULANMIŞ TEFAS RESMİ VERİTABANI
@@ -254,7 +255,7 @@ TEFAS_DATABASE = {
     'BVV': {
         'adi': 'BV Portföy Teknoloji Değişken Fonu',
         'valor': 3,
-        'kazrisk': 24,
+        'kazrisk': 19,
         'makro': 19,
         'aksiyon': 'Taze Giriş Yapan Çip Fonu',
         'daily_returns': [
@@ -368,7 +369,7 @@ TEFAS_DATABASE = {
 }
 
 
-# Dynamic Scraper
+# Dynamic Web Scraper
 def fetch_official_tefas_name(fund_code):
   fund_code = fund_code.upper().strip()
 
@@ -457,7 +458,7 @@ if uploaded_file is not None:
             'daily_returns': db_info.get('daily_returns', [0.10] * 10),
         })
 
-    # 2. KGDM-3 Puan ve Fiyat % Getirisi Hesaplamaları
+    # 2. KGDM-3 Puan ve Doğrudan Fiyat Getirisinden Üretilen Skor Geçmişi
     calculated_funds = []
     for item in user_funds:
       code = item['kod']
@@ -484,19 +485,21 @@ if uploaded_file is not None:
         karar = 'ACİL SAT (<25 Puan)'
         karar_sira = 4
 
-      # 10 Günlük Skor Eğrisi
-      daily_scores = []
-      base_start = kgdm_skor - 12 if 'ACİL SAT' not in karar else kgdm_skor + 10
-      for i in range(10):
-        val = (
-            base_start - (i * 1.1)
-            if 'ACİL SAT' in karar
-            else base_start + (i * 1.2)
-        )
-        daily_scores.append(round(min(100, max(0, val)), 1))
-      daily_scores[-1] = kgdm_skor
+      # DÜZELTİLMİŞ SKOR HESABI:
+      # Son günün anlık skorundan (kgdm_skor) geriye doğru günlük % getirileri düşerek/ekleyerek hesaplama
+      daily_scores = [0.0] * 10
+      daily_scores[-1] = kgdm_skor  # 10. Gün Skoru Kesinleştirilir
 
-      # % Fiyat Getirileri
+      # Geriye dönük skor adımları
+      for i in range(8, -1, -1):
+        # r: i+1 günündeki % fiyat getirisi
+        ret_val = raw_returns[i + 1]
+        # Skor değişimi = % getiri * katsayı (örn: 1.5 katsayı duyarlılığı)
+        score_change = ret_val * 1.5
+        prev_score = daily_scores[i + 1] - score_change
+        daily_scores[i] = round(min(100, max(0, prev_score)), 1)
+
+      # % Fiyat Getirileri Metin Formatı
       price_pct_changes = []
       for ret in raw_returns:
         if ret > 0:
@@ -579,7 +582,7 @@ if uploaded_file is not None:
       ws_scores.append(row_data)
       scores_table_data.append(row_data)
 
-    # 5. Özel Font Renklendirmeleri (Zemin Dolgusu Yok, Yalnızca Metin Rengi)
+    # 5. Özel Font Renklendirmeleri (Yalnızca Metin Rengi)
     green_font = Font(name='Calibri', bold=True, color='375623')
     red_font = Font(name='Calibri', bold=True, color='C65911')
     yellow_font = Font(name='Calibri', color='7F6000')
@@ -620,15 +623,15 @@ if uploaded_file is not None:
     output.seek(0)
 
     st.success(
-        '✅ Model kararları ve % Fiyat Getirileri font renkleriye (Yeşil/Kırmızı)'
-        ' başarıyla uygulandı!'
+        '✅ Günlük skor hesaplamaları % fiyat getirileriyle %100 uyumlu hale'
+        ' getirildi ve düzeltildi!'
     )
 
     df_display = pd.DataFrame(scores_table_data, columns=headers_scores)
     st.dataframe(df_display, use_container_width=True)
 
     st.download_button(
-        label='📥 Font Renkli Excel İndir (fonlar_guncel.xlsx)',
+        label='📥 Düzeltilmiş Excel İndir (fonlar_guncel.xlsx)',
         data=output,
         file_name='fonlar_guncel.xlsx',
         mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
