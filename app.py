@@ -193,6 +193,7 @@ if uploaded_file is not None:
     calculated_funds = []
     for item in user_funds:
       code = item['kod']
+      name = item['adi']
       valor = item['valor']
       kazrisk = item['kazrisk']
       makro = item['makro']
@@ -227,6 +228,7 @@ if uploaded_file is not None:
 
       calculated_funds.append({
           'code': code,
+          'name': name,
           'valor': valor,
           'kgdm_skor': kgdm_skor,
           'karar': karar,
@@ -235,9 +237,7 @@ if uploaded_file is not None:
           'aksiyon': aksiyon,
       })
 
-    # 3. İstenen Çift Aşamalı Sıralama Mantığı:
-    # 1. Öncelik: Model Kararı Hiyerarşisi (1: GÜÇLÜ AL, 2: ASIL LİSTE, 3: NÖTR, 4: ACİL SAT)
-    # 2. Öncelik: KGDM-3 Anlık Skoruna Göre Büyükten Küçüğe (-kgdm_skor)
+    # 3. Çift Aşamalı Sıralama (Hiyerarşi + Skor)
     calculated_funds.sort(key=lambda x: (x['karar_sira'], -x['kgdm_skor']))
 
     # 4. KGDM3_Puanlama Sayfasını Hazırlama & Yazma
@@ -255,8 +255,9 @@ if uploaded_file is not None:
       curr -= datetime.timedelta(days=1)
     business_days.reverse()
 
+    # 'Fon Adı' sütunu 'Fon Kodu'nun hemen yanına eklendi
     headers_scores = (
-        ['Fon Kodu', 'Valör', 'KGDM-3 Anlık Skor', 'Model Kararı']
+        ['Fon Kodu', 'Fon Adı', 'Valör', 'KGDM-3 Anlık Skor', 'Model Kararı']
         + business_days
         + ['Açıklama / Aksiyon']
     )
@@ -275,7 +276,13 @@ if uploaded_file is not None:
     scores_table_data = []
     for item in calculated_funds:
       row_data = (
-          [item['code'], item['valor'], item['kgdm_skor'], item['karar']]
+          [
+              item['code'],
+              item['name'],
+              item['valor'],
+              item['kgdm_skor'],
+              item['karar'],
+          ]
           + item['daily_trend']
           + [item['aksiyon']]
       )
@@ -299,7 +306,7 @@ if uploaded_file is not None:
         min_col=1,
         max_col=len(headers_scores),
     ):
-      karar_cell = row[3]
+      karar_cell = row[4]  # Sütun sırası değiştiği için index 4 oldu
       val = str(karar_cell.value)
       if 'GÜÇLÜ AL' in val or 'ASIL LİSTE' in val:
         karar_cell.fill = green_fill
@@ -323,8 +330,8 @@ if uploaded_file is not None:
     output.seek(0)
 
     st.success(
-        '✅ Dosyanız okundu, eksikler tamamlandı ve fonlar Model Kararı ile'
-        ' Anlık Skora göre mükemmel sıralandı!'
+        '✅ Dosyanız okundu, eksikler tamamlandı ve fonlar Fon Adı bilgisiyle'
+        ' birlikte mükemmel sıralandı!'
     )
 
     # Ekran Tablosu
