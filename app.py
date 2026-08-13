@@ -16,9 +16,7 @@ st.set_page_config(
 
 st.title("📊 KGDM-3 Fon Analiz ve Excel Otomasyonu (12 Motorlu)")
 st.caption(
-    "Türkiye'nin en gelişmiş portföy analiz aracı. "
-    "12 farklı kaynaktan veri şelalesi (waterfall) kullanarak fonları puanlar. "
-    "Eksik verileri alternatif API'lerle (pytefas, fonoloji, vb.) tamamlar."
+    "12 farklı kaynaktan veri şelalesi (waterfall) kullanarak fonları puan ve eksik verileri alternatif API'lerle (pytefas, fonoloji, vb.) tamamlar."
 )
 
 FUND_KINDS = ["YAT", "EMK", "BYF"]
