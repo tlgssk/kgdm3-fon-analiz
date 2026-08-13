@@ -14,11 +14,11 @@ st.set_page_config(
 
 st.title('📊 KGDM-3 Fon Analiz ve Excel Otomasyonu')
 st.caption(
-    'Fon_Listesi sayfasındaki fonları tamamlar, KGDM-3 puanlarını ve %100 uyumlu'
-    ' skor geçmişini hesaplar.'
+    'Fon_Listesi sayfasındaki fonları tamamlar, KGDM-3 puanlarını hesaplar ve'
+    ' skorlar ile % getirileri gruplandırarak yan yana sıralar.'
 )
 
-# 1. KAPSAMLI TEFAS RESMİ VERİTABANI (PHE ve PBR Eklendi)
+# 1. KAPSAMLI TEFAS RESMİ VERİTABANI
 TEFAS_DATABASE = {
     'PNU': {'adi': 'Pardus Portföy TL Para Piyasası Fonu', 'valor': 0, 'kazrisk': 52, 'makro': 30, 'aksiyon': 'Likit Ana Depo', 'daily_returns': [0.11, 0.12, 0.11, 0.11, 0.12, 0.11, 0.11, 0.12, 0.11, 0.11]},
     'VK6': {'adi': 'Vakıf Portföy TL Para Piyasası Fonu', 'valor': 0, 'kazrisk': 40, 'makro': 30, 'aksiyon': 'Likit Çapa', 'daily_returns': [0.10, 0.11, 0.10, 0.10, 0.11, 0.10, 0.10, 0.11, 0.10, 0.10]},
@@ -33,8 +33,6 @@ TEFAS_DATABASE = {
     'AFT': {'adi': 'Ak Portföy Yeni Teknolojiler Yabancı Hisse', 'valor': 3, 'kazrisk': 16, 'makro': 11, 'aksiyon': 'Acil Sat', 'daily_returns': [-0.80, -1.10, -1.35, -0.90, -1.50, -1.85, -2.10, -2.30, -1.95, -1.60]},
     'YAY': {'adi': 'Yapı Kredi Portföy Yabancı Teknoloji', 'valor': 3, 'kazrisk': 15, 'makro': 10, 'aksiyon': 'Acil Sat', 'daily_returns': [-1.10, -1.30, -1.55, -1.20, -1.80, -2.15, -2.40, -2.60, -2.20, -1.85]},
     'KZL': {'adi': 'Kuveyt Türk Kıymetli Madenler', 'valor': 1, 'kazrisk': 20, 'makro': 24, 'aksiyon': 'Emtia Katılım', 'daily_returns': [0.60, 0.75, 0.40, 0.90, 0.85, -0.30, 0.50, 0.65, 0.80, 0.45]},
-    
-    # Hata alınan fonlar veritabanına eklendi
     'PHE': {'adi': 'Hedef Portföy Hisse Senedi Serbest Fon', 'valor': 2, 'kazrisk': 15, 'makro': 20, 'aksiyon': 'Serbest BİST Fonu', 'daily_returns': [0.10, 0.20, 0.50, -0.30, -0.40, 0.80, 1.20, 1.40, 1.10, 0.90]},
     'PBR': {'adi': 'Pardus Portföy Birinci Hisse Senedi Serbest Fon', 'valor': 2, 'kazrisk': 8, 'makro': 12, 'aksiyon': 'Acil Sat (Nötralize)', 'daily_returns': [-0.50, -0.80, -1.20, -2.10, -3.40, -1.80, -2.20, -2.60, -1.50, -1.20]},
 }
@@ -106,7 +104,6 @@ if uploaded_file is not None:
       daily_scores = [0.0] * 10
       daily_scores[-1] = kgdm_skor
 
-      # Düzeltilmiş Skor Hesaplaması (Getiri Yoksa Skor Sabit Kalır)
       for i in range(8, -1, -1):
         ret_val = raw_returns[i + 1]
         score_change = ret_val * 1.5
@@ -132,37 +129,58 @@ if uploaded_file is not None:
       curr -= datetime.timedelta(days=1)
     business_days.reverse()
 
+    # BAŞLIKLARI GRUPLANDIRMA (Tüm Skorlar Yan Yana -> Tüm Getiriler Yan Yana)
     headers_scores = ['Fon Kodu', 'Fon Adı', 'Valör', 'KGDM-3 Anlık Skor', 'Model Kararı']
+    
+    # Skor Başlıkları
     for b_day in business_days:
-      headers_scores.extend([f'{b_day} Skor', f'{b_day} Fiyat % Getiri'])
+      headers_scores.append(f'{b_day} Skor')
+    
+    # % Getiri Başlıkları
+    for b_day in business_days:
+      headers_scores.append(f'{b_day} % Getiri')
+      
     headers_scores.append('Açıklama / Aksiyon')
-
     ws_scores.append(headers_scores)
+
     header_fill = PatternFill(start_color='1F4E79', end_color='1F4E79', fill_type='solid')
     header_font = Font(name='Calibri', size=11, bold=True, color='FFFFFF')
 
     for cell in ws_scores[1]:
       cell.fill, cell.font, cell.alignment = header_fill, header_font, Alignment(horizontal='center', vertical='center')
 
+    # VERİLERİ GRUPLANDIRARAK YAZMA
     scores_table_data = []
     for item in calculated_funds:
       row_data = [item['code'], item['name'], item['valor'], item['kgdm_skor'], item['karar']]
+      
+      # 1. Önce 10 günlük skorlar eklenir
       for d_idx in range(10):
-        row_data.extend([item['daily_scores'][d_idx], item['price_pct_changes'][d_idx]])
+        row_data.append(item['daily_scores'][d_idx])
+        
+      # 2. Sonra 10 günlük fiyat getirileri eklenir
+      for d_idx in range(10):
+        row_data.append(item['price_pct_changes'][d_idx])
+        
       row_data.append(item['aksiyon'])
       ws_scores.append(row_data)
       scores_table_data.append(row_data)
 
-    green_font, red_font, yellow_font = Font(name='Calibri', bold=True, color='375623'), Font(name='Calibri', bold=True, color='C65911'), Font(name='Calibri', color='7F6000')
+    green_font = Font(name='Calibri', bold=True, color='375623')
+    red_font = Font(name='Calibri', bold=True, color='C65911')
+    yellow_font = Font(name='Calibri', color='7F6000')
 
+    # RENKLENDİRME İŞLEMLERİ
     for row in ws_scores.iter_rows(min_row=2, max_row=len(calculated_funds) + 1, min_col=1, max_col=len(headers_scores)):
+      # Model Kararı (Sütun İndeksi: 4)
       karar_cell = row[4]
       val = str(karar_cell.value)
       if 'GÜÇLÜ AL' in val or 'ASIL LİSTE' in val: karar_cell.font = green_font
       elif 'NÖTR' in val: karar_cell.font = yellow_font
       elif 'ACİL SAT' in val: karar_cell.font = red_font
 
-      for col_idx in range(6, len(headers_scores), 2):
+      # % Getiriler Renklendirmesi (Skorlardan Sonra Başlar: İndeks 15 ile 24 arası)
+      for col_idx in range(15, 25): 
         ret_cell, ret_val = row[col_idx], str(row[col_idx].value)
         if ret_val.startswith('+'): ret_cell.font = green_font
         elif ret_val.startswith('-'): ret_cell.font = red_font
@@ -175,6 +193,6 @@ if uploaded_file is not None:
     wb.save(output)
     output.seek(0)
 
-    st.success('✅ Kod başarıyla güncellendi. PHE ve PBR verileri eklendi, geri dönük skor problemi çözüldü!')
+    st.success('✅ Skorlar ve % Getiriler ayrı ayrı gruplandırılarak tabloya yerleştirildi!')
     st.dataframe(pd.DataFrame(scores_table_data, columns=headers_scores), use_container_width=True)
-    st.download_button(label='📥 Düzeltilmiş Font Renkli Excel İndir', data=output, file_name='fonlar_guncel.xlsx', mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    st.download_button(label='📥 Düzenli Tabloyu İndir (fonlar_guncel.xlsx)', data=output, file_name='fonlar_guncel.xlsx', mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
