@@ -14,40 +14,19 @@ st.set_page_config(
     page_title="KGDM-3 Fon Analiz Otomasyonu", layout="wide", page_icon="📊"
 )
 
-st.title("📊 KGDM-3 Fon Analiz ve Excel Otomasyonu (12 Motorlu)")
+st.title("📊 KGDM-3 Fon Analiz ve Excel Otomasyonu")
 st.caption(
-    "12 farklı kaynaktan veri şelalesi (waterfall) kullanarak fonları puan ve eksik verileri alternatif API'lerle (pytefas, fonoloji, vb.) tamamlar."
+    "Türkiye'nin en gelişmiş portföy analiz aracı. "
+    "Farklı açık kaynaklardan (TEFAS, İş Yatırım, Fintables vb.) veri şelalesi "
+    "kullanarak fonları puanlar. AUM (Fon Büyüklüğü) ve Yatırımcı Sayısı verilerini entegre eder."
 )
 
 FUND_KINDS = ["YAT", "EMK", "BYF"]
 LOOKBACK_CALENDAR_DAYS = 20
 TARGET_TRADING_DAYS = 10
-FONOLOJI_BASE_URL = "https://fonoloji.com/v1"
-
-# --- KENAR ÇUBUĞU (SIDEBAR) AYARLARI ---
-with st.sidebar:
-    st.subheader("⚙️ Veri Motoru Ayarları")
-    
-    fonoloji_api_key = st.text_input(
-        "Fonoloji API Anahtarı (isteğe bağlı)",
-        type="password",
-        help="Ücretsiz yedek kaynak için: https://fonoloji.com/kayit",
-    )
-    
-    st.divider()
-    
-    st.markdown("### ⚠️ BorsaPy Gelişmiş Metrikleri")
-    st.markdown(
-        "<small><i>BorsaPy kütüphanesi fonların **Alış/Satış Valörü** ve **Kategori Sıralaması** "
-        "gibi özel verilerini sağlar. Ancak ticari kullanıma kapalıdır ve BİST lisansı gerektirebilir. "
-        "Ayrıca TEFAS bot koruması nedeniyle zaman zaman kararsız çalışabilir.</i></small>",
-        unsafe_allow_html=True
-    )
-    use_borsapy = st.checkbox("BorsaPy'i Aktif Et (Yalnızca Bireysel/Eğitim Kullanımı İçin Kabul Ediyorum)", value=False)
-
 
 # ---------------------------------------------------------------------------
-# 12 KATMANLI ŞELALE VERİ ÇEKME MOTORU VE EKSTRA METRİKLER
+# ŞELALE VERİ ÇEKME MOTORU VE EKSTRA METRİKLER (API KEY GEREKTİRMEZ)
 # ---------------------------------------------------------------------------
 
 @st.cache_data(show_spinner=False, ttl=60 * 30)
@@ -95,7 +74,6 @@ def fetch_pytefas_data(fund_code: str) -> dict:
         from pytefas import get_fund_info
         info = get_fund_info(fund_code)
         if info:
-            # PyTefas'ın genel sözlük yapısından büyüklük ve kişi sayısını alıyoruz
             return {
                 "aum": info.get("total_value", info.get("fund_size", 0.0)),
                 "investors": info.get("investors_count", info.get("people", 0))
@@ -105,40 +83,8 @@ def fetch_pytefas_data(fund_code: str) -> dict:
     return {"aum": 0.0, "investors": 0}
 
 
-def fetch_borsapy_data(fund_code: str) -> dict:
-    """KAYNAK 3: BorsaPy (Opsiyonel) - Otomatik Valör ve Komisyon"""
-    if not use_borsapy:
-        return {"valor_al": None, "valor_sat": None}
-    
-    try:
-        from borsapy import Fund
-        f = Fund(fund_code)
-        # BorsaPy verileri başarıyla çekerse döndür (WAF engeline karşı try-except korumalı)
-        return {
-            "valor_al": f.buy_value_date,
-            "valor_sat": f.sell_value_date
-        }
-    except Exception:
-        return {"valor_al": None, "valor_sat": None}
-
-
-def fetch_fonoloji_series(fund_code: str, api_key: str) -> pd.DataFrame | None:
-    """KAYNAK 4: Fonoloji API"""
-    headers = {"X-API-Key": api_key}
-    try:
-        hist_resp = requests.get(f"{FONOLOJI_BASE_URL}/funds/{fund_code}/history", headers=headers, params={"period": "1m"}, timeout=4)
-        if hist_resp.status_code == 200:
-            points = hist_resp.json().get("points", [])
-            if points:
-                df = pd.DataFrame(points)
-                df["date"] = pd.to_datetime(df["date"])
-                df["price"] = pd.to_numeric(df["price"], errors="coerce")
-                return df.dropna(subset=["price"]).sort_values("date").tail(TARGET_TRADING_DAYS + 1).reset_index(drop=True)
-    except Exception: pass
-    return None
-
 def fetch_isyatirim_series(fund_code: str) -> pd.DataFrame | None:
-    """KAYNAK 5: İş Yatırım"""
+    """KAYNAK 3: İş Yatırım (API Key İstemez)"""
     end = datetime.datetime.now()
     start = end - datetime.timedelta(days=30)
     try:
@@ -154,7 +100,7 @@ def fetch_isyatirim_series(fund_code: str) -> pd.DataFrame | None:
     return None
 
 def fetch_fintables_series(fund_code: str) -> pd.DataFrame | None:
-    """KAYNAK 6: Fintables"""
+    """KAYNAK 4: Fintables"""
     try:
         res = requests.get(f"https://fintables.com/fonlar/{fund_code}", headers={'User-Agent': 'Mozilla/5.0'}, timeout=3)
         if res.status_code == 200:
@@ -168,8 +114,9 @@ def fetch_fintables_series(fund_code: str) -> pd.DataFrame | None:
     except Exception: pass
     return None
 
-# Diğer Yedek Kaynaklar (7, 8, 9, 10, 11, 12) Hızlı Tarama İçin Toplandı
+
 def try_other_fallbacks(fund_code: str) -> pd.DataFrame | None:
+    """KAYNAK 5+: Diğer Açık Kaynaklı Kazıyıcılar"""
     sources = [
         ("https://iyigelir.net/fon/", r'data-price="(\d+\.\d+)"'),
         ("https://www.getmidas.com/fonlar/", r'"closingPrice":(\d+\.\d+)'),
@@ -252,7 +199,7 @@ if uploaded_file is not None:
             today = datetime.date.today()
             start_date = today - datetime.timedelta(days=LOOKBACK_CALENDAR_DAYS)
 
-            with st.spinner("12 Farklı Motorla Veri Analizi Çalıştırılıyor (TEFAS, PyTefas, BorsaPy...)..."):
+            with st.spinner("Açık Kaynaklı Veri Şelalesi Çalıştırılıyor (TEFAS, İş Yatırım vb.)..."):
                 try:
                     universe = fetch_tefas_universe(start_date, today)
                 except Exception:
@@ -268,10 +215,6 @@ if uploaded_file is not None:
                 if not universe.empty:
                     series = get_fund_series(universe, code)
                     if series is not None: data_source = "TEFAS Crawler"
-                
-                if series is None and fonoloji_api_key:
-                    series = fetch_fonoloji_series(code, fonoloji_api_key)
-                    if series is not None: data_source = "Fonoloji API"
                 
                 if series is None:
                     series = fetch_isyatirim_series(code)
@@ -289,14 +232,11 @@ if uploaded_file is not None:
                 if metrics is None:
                     continue
                 
-                # Ekstra Metrikler (PyTefas & BorsaPy)
+                # AUM ve Yatırımcı Sayısı (PyTefas)
                 extra_data = fetch_pytefas_data(code)
-                borsapy_data = fetch_borsapy_data(code)
                 
-                # Valör Belirleme Önceliği: 1. Excel'deki Girdi, 2. BorsaPy, 3. Varsayılan Yok
+                # Excel'den gelen valör değeri
                 final_valor = excel_valor_dict.get(code)
-                if final_valor is None and use_borsapy and borsapy_data.get("valor_sat") is not None:
-                    final_valor = borsapy_data["valor_sat"]
 
                 calculated_funds.append({
                     "code": code, 
@@ -345,7 +285,7 @@ if uploaded_file is not None:
 
             day_labels = calculated_funds[0]["dates"]
             headers_scores = [
-                "Fon Kodu", "Satış Valörü", "KGDM-3 Skor", "Model Kararı", 
+                "Fon Kodu", "Valör (Excel)", "KGDM-3 Skor", "Model Kararı", 
                 "Ort. Getiri (%)", "Volatilite (%)", "Sharpe", 
                 "Fon Büyüklüğü (AUM ₺)", "Yatırımcı Sayısı", "Fiyat Kaynağı"
             ]
@@ -399,7 +339,7 @@ if uploaded_file is not None:
             wb.save(output)
             output.seek(0)
 
-            st.success("✅ Veri Şelalesi Başarılı! Fiyatlar, AUM (Büyüklük), Yatırımcı Sayısı ve Valör verileri başarıyla sisteme işlendi.")
+            st.success("✅ Veri Şelalesi Başarılı! Fiyatlar, AUM (Büyüklük) ve Yatırımcı Sayısı sorunsuz işlendi.")
 
             df_display = pd.DataFrame(scores_table_data, columns=headers_scores)
             def color_cells(val):
@@ -413,4 +353,4 @@ if uploaded_file is not None:
             except AttributeError: styled_df = df_display.style.applymap(color_cells)
 
             st.dataframe(styled_df, use_container_width=True)
-            st.download_button(label="📥 Kapsamlı Tabloyu İndir (fonlar_guncel.xlsx)", data=output, file_name="fonlar_guncel.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            st.download_button(label="📥 Temiz ve Güvenli Tabloyu İndir (fonlar_guncel.xlsx)", data=output, file_name="fonlar_guncel.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
