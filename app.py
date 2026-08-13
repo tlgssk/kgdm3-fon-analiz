@@ -1,363 +1,1762 @@
-import datetime
+ChatGPT:
+import datetime as dt
 import io
 import re
-import time
-import requests
+from typing import Optional
 
 import openpyxl
 import pandas as pd
+import requests
 import streamlit as st
-from openpyxl.styles import Alignment, Font, PatternFill
+
+from openpyxl.formatting.rule import CellIsRule
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
+
 st.set_page_config(
-    page_title="KGDM-3 Fon Analiz Otomasyonu", layout="wide", page_icon="📊"
+    page_title="KGDM-3 Fon Analiz Otomasyonu",
+    page_icon="📊",
+    layout="wide",
 )
 
 st.title("📊 KGDM-3 Fon Analiz ve Excel Otomasyonu")
 st.caption(
-    "Türkiye'nin en gelişmiş portföy analiz aracı. "
-    "Farklı açık kaynaklardan veri şelalesi kullanarak fonları **son 3 iş günü** "
-    "üzerinden puanlar. AUM ve Yatırımcı Sayısı verilerini entegre eder."
+    "TEFAS merkezli veri şelalesi kullanarak fonları analiz eder, "
+    "KGDM-3 puanı üretir ve güncel Excel dosyası oluşturur."
 )
 
-FUND_KINDS = ["YAT", "EMK", "BYF"]
-# 3 iş günü verisi bulabilmek için hafta sonları/tatilleri gözeterek takvim gününü 10 olarak ayarlıyoruz
-LOOKBACK_CALENDAR_DAYS = 10 
-# İstenen hedef iş günü sayısını 3'e düşürdük
-TARGET_TRADING_DAYS = 3
 
-# ---------------------------------------------------------------------------
-# ŞELALE VERİ ÇEKME MOTORU VE EKSTRA METRİKLER (API KEY GEREKTİRMEZ)
-# ---------------------------------------------------------------------------
+FUND_KINDS = ("YAT", "EMK", "BYF")
+LOOKBACK_CALENDAR_DAYS = 35
+TARGET_TRADING_DAYS = 10
+HTTP_TIMEOUT = 8
+APP_VERSION = "3.0.0"
+
+COLOR_NAVY = "1F4E79"
+COLOR_GREEN = "008000"
+COLOR_RED = "FF0000"
+COLOR_YELLOW = "B8860B"
+COLOR_WHITE = "FFFFFF"
+COLOR_LIGHT_GREEN = "E2F0D9"
+COLOR_LIGHT_RED = "FCE4D6"
+COLOR_LIGHT_YELLOW = "FFF2CC"
+
+
+def parse_number(value) -> Optional[float]:
+    if value is None or isinstance(value, bool):
+        return None
+
+    if isinstance(value, (int, float)):
+        try:
+            if pd.isna(value):
+                return None
+        except Exception:
+            pass
+        return float(value)
+
+    text = str(value).strip()
+
+    if not text:
+        return None
+
+    text = (
+        text.replace("₺", "")
+        .replace("TL", "")
+        .replace("%", "")
+        .replace(" ", "")
+        .strip()
+    )
+
+    if not text:
+        return None
+
+    if "," in text and "." in text:
+        if text.rfind(",") > text.rfind("."):
+            text = text.replace(".", "")
+            text = text.replace(",", ".")
+        else:
+            text = text.replace(",", "")
+    elif "," in text:
+        text = text.replace(",", ".")
+
+    try:
+        return float(text)
+    except (ValueError, TypeError):
+        return None
+
+
+def normalize_fund_code(value) -> str:
+    if value is None:
+        return ""
+
+    code = str(value).strip().upper()
+
+    if code.endswith(".0"):
+        code = code[:-2]
+
+    return code
+
+
+def format_money(value) -> str:
+    number = parse_number(value)
+
+    if number is None:
+        return "-"
+
+    return f"{number:,.0f} ₺".replace(",", ".")
+
+
+def format_integer(value) -> str:
+    number = parse_number(value)
+
+    if number is None:
+        return "-"
+
+    return f"{int(round(number)):,}".replace(",", ".")
+
+
+def format_percent(value) -> str:
+    number = parse_number(value)
+
+    if number is None:
+        return "-"
+
+    if number > 0:
+        return f"+%{number:.2f}"
+
+    if number < 0:
+        return f"-%{abs(number):.2f}"
+
+    return "%0.00"
+
 
 @st.cache_data(show_spinner=False, ttl=60 * 30)
-def fetch_tefas_universe(start_date: datetime.date, end_date: datetime.date) -> pd.DataFrame:
-    """KAYNAK 1: TEFAS Crawler (Resmi - Ana Motor)"""
+def fetch_tefas_universe(
+    start_date: dt.date,
+    end_date: dt.date,
+) -> pd.DataFrame:
     try:
-        from tefas import Crawler
+        from pytefas import Crawler
     except ImportError:
         return pd.DataFrame()
 
-    crawler = Crawler()
-    frames = []
-    for kind in FUND_KINDS:
-        try:
-            df = crawler.fetch(
-                start=start_date.isoformat(),
-                end=end_date.isoformat(),
-                kind=kind,
-                columns=["code", "date", "price", "title"],
+    try:
+        crawler = Crawler(
+            timeout=60,
+            max_retry=5,
+        )
+
+        df = crawler.fetch_many(
+            start=start_date,
+            end=end_date,
+            kinds=FUND_KINDS,
+            columns="info",
+        )
+
+        if df is None or df.empty:
+            return pd.DataFrame()
+
+        df = df.copy()
+
+        rename_map = {
+            "fund_code": "code",
+            "fund_name": "title",
+            "investor_count": "investors",
+            "portfolio_size": "aum",
+        }
+
+        df.rename(
+            columns=rename_map,
+            inplace=True,
+        )
+
+        required_columns = [
+            "date",
+            "code",
+            "price",
+        ]
+
+        for column in required_columns:
+            if column not in df.columns:
+                return pd.DataFrame()
+
+        df["code"] = (
+            df["code"]
+            .astype(str)
+            .str.strip()
+            .str.upper()
+        )
+
+        df["date"] = pd.to_datetime(
+            df["date"],
+            errors="coerce",
+        )
+
+        df["price"] = df["price"].apply(parse_number)
+
+        if "aum" in df.columns:
+            df["aum"] = df["aum"].apply(parse_number)
+        else:
+            df["aum"] = 0.0
+
+        if "investors" in df.columns:
+            df["investors"] = df["investors"].apply(parse_number)
+        else:
+            df["investors"] = 0
+
+        if "kind" not in df.columns:
+            df["kind"] = ""
+
+        if "title" not in df.columns:
+            df["title"] = ""
+
+        df = df.dropna(
+            subset=[
+                "date",
+                "code",
+                "price",
+            ]
+        )
+
+        df = df[df["price"] > 0]
+
+        df = (
+            df.sort_values(["code", "date"])
+            .drop_duplicates(
+                subset=["code", "date"],
+                keep="last",
             )
-            if df is not None and len(df) > 0:
-                frames.append(df.copy())
-        except Exception:
-            pass
-        time.sleep(0.5)
+            .reset_index(drop=True)
+        )
 
-    if not frames: return pd.DataFrame()
-    universe = pd.concat(frames, ignore_index=True)
-    universe["date"] = pd.to_datetime(universe["date"])
-    universe["price"] = pd.to_numeric(universe["price"].astype(str).str.replace(",", "."), errors="coerce")
-    return universe.dropna(subset=["price"])
+        return df
+
+    except Exception:
+        return pd.DataFrame()
 
 
-def get_fund_series(universe: pd.DataFrame, fund_code: str) -> pd.DataFrame | None:
-    rows = universe[universe["code"].str.upper() == fund_code.upper()]
-    if rows.empty: return None
-    rows = rows.sort_values("date").drop_duplicates(subset="date", keep="last")
-    if len(rows) > TARGET_TRADING_DAYS + 1: rows = rows.tail(TARGET_TRADING_DAYS + 1)
+def get_fund_series(
+    universe: pd.DataFrame,
+    fund_code: str,
+) -> Optional[pd.DataFrame]:
+    if universe is None or universe.empty:
+        return None
+
+    code = normalize_fund_code(fund_code)
+
+    if not code:
+        return None
+
+    rows = universe[
+        universe["code"]
+        .astype(str)
+        .str.upper()
+        .eq(code)
+    ].copy()
+
+    if rows.empty:
+        return None
+
+    rows = (
+        rows.sort_values("date")
+        .drop_duplicates(
+            subset=["date"],
+            keep="last",
+        )
+    )
+
+    if len(rows) < 2:
+        return None
+
+    if len(rows) > TARGET_TRADING_DAYS + 1:
+        rows = rows.tail(
+            TARGET_TRADING_DAYS + 1
+        )
+
     return rows.reset_index(drop=True)
 
 
-def fetch_pytefas_data(fund_code: str) -> dict:
-    """KAYNAK 2: PyTefas (Alternatif Resmi) - AUM ve Yatırımcı Sayısı için"""
-    try:
-        from pytefas import get_fund_info
-        info = get_fund_info(fund_code)
-        if info:
-            return {
-                "aum": info.get("total_value", info.get("fund_size", 0.0)),
-                "investors": info.get("investors_count", info.get("people", 0))
-            }
-    except Exception:
-        pass
-    return {"aum": 0.0, "investors": 0}
-
-
-def fetch_isyatirim_series(fund_code: str) -> pd.DataFrame | None:
-    """KAYNAK 3: İş Yatırım (API Key İstemez)"""
-    end = datetime.datetime.now()
-    start = end - datetime.timedelta(days=15)
-    try:
-        url = "https://www.isyatirim.com.tr/_layouts/15/IsYatirim.Website/Common/Data.aspx/YatirimFonGecmisGetiri"
-        res = requests.get(url, params={"fonKod": fund_code, "baslangic": start.strftime("%d-%m-%Y"), "bitis": end.strftime("%d-%m-%Y")}, headers={'User-Agent': 'Mozilla/5.0'}, timeout=3)
-        if res.status_code == 200 and 'value' in res.json() and res.json()['value']:
-            df = pd.DataFrame(res.json()['value'])
-            if 'Tarih' in df.columns and 'Fiyat' in df.columns:
-                df['date'] = pd.to_datetime(df['Tarih'], format='%d.%m.%Y')
-                df['price'] = df['Fiyat'].astype(float)
-                return df.sort_values("date").dropna(subset=["price"]).tail(TARGET_TRADING_DAYS + 1).reset_index(drop=True)
-    except Exception: pass
-    return None
-
-def fetch_fintables_series(fund_code: str) -> pd.DataFrame | None:
-    """KAYNAK 4: Fintables"""
-    try:
-        res = requests.get(f"https://fintables.com/fonlar/{fund_code}", headers={'User-Agent': 'Mozilla/5.0'}, timeout=3)
-        if res.status_code == 200:
-            prices = re.findall(r'"price":(\d+\.\d+)', res.text)
-            dates = re.findall(r'"date":"(\d{4}-\d{2}-\d{2})', res.text)
-            if len(prices) >= TARGET_TRADING_DAYS + 1:
-                return pd.DataFrame({
-                    "date": pd.to_datetime(dates[-(TARGET_TRADING_DAYS+1):]),
-                    "price": [float(p) for p in prices[-(TARGET_TRADING_DAYS+1):]]
-                })
-    except Exception: pass
-    return None
-
-
-def try_other_fallbacks(fund_code: str) -> pd.DataFrame | None:
-    """KAYNAK 5+: Diğer Açık Kaynaklı Kazıyıcılar"""
-    sources = [
-        ("https://iyigelir.net/fon/", r'data-price="(\d+\.\d+)"'),
-        ("https://www.getmidas.com/fonlar/", r'"closingPrice":(\d+\.\d+)'),
-        ("https://www.bloomberght.com/yatirim-fonlari/", r'"LastPrice":(\d+\.\d+)'),
-        ("https://www.yatirimdirekt.com/fon/", r'"nav":(\d+\.\d+)'),
-        ("https://www.borsadirekt.com/fonlar/", r'fonFiyat">(\d+\.\d+)<')
-    ]
-    for url_base, regex in sources:
-        try:
-            res = requests.get(f"{url_base}{fund_code.lower()}", headers={'User-Agent': 'Mozilla/5.0'}, timeout=2)
-            if res.status_code == 200:
-                prices = re.findall(regex, res.text)
-                if len(prices) >= 2:
-                    # En az 2 nokta bulunursa son 3 iş günü hedefini yakalamaya çalışıyoruz
-                    # Yetmezse de elimizdekini döndürüyoruz.
-                    return pd.DataFrame({"date": pd.date_range(end=datetime.date.today(), periods=len(prices)), "price": [float(p) for p in prices]}).tail(TARGET_TRADING_DAYS + 1).reset_index(drop=True)
-        except Exception: continue
-    return None
-
-# ---------------------------------------------------------------------------
-# HESAPLAMALAR VE METRİKLER (3 Günlük Odak)
-# ---------------------------------------------------------------------------
-
-def compute_fund_metrics(series: pd.DataFrame) -> dict | None:
-    if series is None or len(series) < 2: return None
-
-    prices = series["price"].tolist()
-    dates = series["date"].dt.strftime("%d.%m").tolist()
-
-    daily_returns = [0.0] + [((prices[i] / prices[i - 1] - 1) * 100) if prices[i-1] != 0 else 0.0 for i in range(1, len(prices))]
-    
-    display_dates = dates[1:]
-    daily_returns = daily_returns[1:]
-    n = len(daily_returns)
-    if n == 0: return None
-
-    mean_return = sum(daily_returns) / n
-    volatility = (sum((r - mean_return) ** 2 for r in daily_returns) / n) ** 0.5
-    sharpe_like = (mean_return / volatility) if volatility > 1e-9 else 0.0
-    cumulative_return = (prices[-1] / prices[0] - 1) * 100
-
-    running_scores = [int(round(50 + ((prices[i] / prices[0] - 1) * 100) * 5)) for i in range(1, len(prices))]
-
-    return {
-        "dates": display_dates, "daily_returns": daily_returns, "running_scores": running_scores,
-        "mean_return": mean_return, "volatility": volatility, "sharpe_like": sharpe_like, "cumulative_return": cumulative_return, "n_days": n
+def get_latest_fund_info(
+    universe: pd.DataFrame,
+    fund_code: str,
+) -> dict:
+    result = {
+        "aum": 0.0,
+        "investors": 0,
     }
 
-def zscore(values: list[float]) -> list[float]:
-    n = len(values)
-    if n == 0: return []
-    mean = sum(values) / n
-    std = (sum((v - mean) ** 2 for v in values) / n) ** 0.5
-    if std < 1e-9: return [0.0] * n
-    return [(v - mean) / std for v in values]
+    if universe is None or universe.empty:
+        return result
 
-# ---------------------------------------------------------------------------
-# ANA UYGULAMA
-# ---------------------------------------------------------------------------
-uploaded_file = st.file_uploader("Excel Dosyanızı Yükleyin (fonlar.xlsx):", type=["xlsx"])
+    code = normalize_fund_code(fund_code)
 
-if uploaded_file is not None:
-    wb = openpyxl.load_workbook(uploaded_file)
+    rows = universe[
+        universe["code"]
+        .astype(str)
+        .str.upper()
+        .eq(code)
+    ].copy()
 
-    if "Fon_Listesi" not in wb.sheetnames:
-        st.error("Yüklenen dosyada 'Fon_Listesi' sayfası bulunamadı!")
-    else:
-        ws_list = wb["Fon_Listesi"]
-        requested_codes = []
-        excel_valor_dict = {}
-        for row in ws_list.iter_rows(min_row=2, values_only=False):
-            code_cell, valor_cell = row[0], row[3] if len(row) > 3 else None
-            if code_cell.value:
-                code = str(code_cell.value).strip().upper()
-                requested_codes.append(code)
-                try: excel_valor_dict[code] = int(valor_cell.value) if valor_cell.value else None
-                except: excel_valor_dict[code] = None
+    if rows.empty:
+        return result
 
-        if not requested_codes:
-            st.warning("Fon_Listesi sayfasında fon kodu bulunamadı.")
-        else:
-            # Tarih uyuşmazlığını engellemek için 2024 yılına sabitlenebilir. 
-            # Ancak kodun her zaman taze kalması için today() metodunu tutuyoruz.
-            today = datetime.date.today()
-            start_date = today - datetime.timedelta(days=LOOKBACK_CALENDAR_DAYS)
+    rows = rows.sort_values("date")
+    latest = rows.iloc[-1]
 
-            with st.spinner("Açık Kaynaklı Veri Şelalesi Çalıştırılıyor (TEFAS, İş Yatırım vb.)..."):
-                try:
-                    universe = fetch_tefas_universe(start_date, today)
-                except Exception:
-                    universe = pd.DataFrame()
+    aum = parse_number(latest.get("aum"))
+    investors = parse_number(latest.get("investors"))
 
-            calculated_funds = []
+    result["aum"] = aum if aum is not None else 0.0
 
-            for code in requested_codes:
-                series = None
-                data_source = "Bulunamadı"
-                
-                # Fiyat Verisi Şelalesi
-                if not universe.empty:
-                    series = get_fund_series(universe, code)
-                    if series is not None: data_source = "TEFAS Crawler"
-                
-                if series is None:
-                    series = fetch_isyatirim_series(code)
-                    if series is not None: data_source = "İş Yatırım"
-                    
-                if series is None:
-                    series = fetch_fintables_series(code)
-                    if series is not None: data_source = "Fintables"
+    result["investors"] = int(
+        round(
+            investors
+            if investors is not None
+            else 0
+        )
+    )
 
-                if series is None:
-                    series = try_other_fallbacks(code)
-                    if series is not None: data_source = "Alternatif Kazıyıcı"
+    return result
 
-                metrics = compute_fund_metrics(series)
-                if metrics is None:
-                    continue
-                
-                # AUM ve Yatırımcı Sayısı (PyTefas)
-                extra_data = fetch_pytefas_data(code)
-                
-                # Excel'den gelen valör değeri
-                final_valor = excel_valor_dict.get(code)
 
-                calculated_funds.append({
-                    "code": code, 
-                    "data_source": data_source, 
-                    "valor": final_valor,
-                    "aum": extra_data["aum"],
-                    "investors": extra_data["investors"],
-                    **metrics
-                })
+def fetch_isyatirim_series(
+    fund_code: str,
+) -> Optional[pd.DataFrame]:
+    code = normalize_fund_code(fund_code)
 
-            if not calculated_funds:
-                st.error("Tüm kaynaklar başarısız oldu. Hiçbir fon hesaplanamadı.")
-                st.stop()
+    if not code:
+        return None
 
-            # --- KGDM-3 Puanlaması (Z-Score) ---
-            mean_returns = [f["mean_return"] for f in calculated_funds]
-            sharpes = [f["sharpe_like"] for f in calculated_funds]
-            cum_returns = [f["cumulative_return"] for f in calculated_funds]
+    end = dt.datetime.now()
+    start = end - dt.timedelta(days=45)
 
-            multi_fund = len(calculated_funds) > 1
-            z_mean = zscore(mean_returns) if multi_fund else [0.0] * len(calculated_funds)
-            z_sharpe = zscore(sharpes) if multi_fund else [0.0] * len(calculated_funds)
-            z_cum = zscore(cum_returns) if multi_fund else [0.0] * len(calculated_funds)
+    url = (
+        "https://www.isyatirim.com.tr/"
+        "_layouts/15/IsYatirim.Website/Common/Data.aspx/"
+        "YatirimFonGecmisGetiri"
+    )
 
-            for i, item in enumerate(calculated_funds):
-                v_pen = (item["valor"] * 0.5) if item["valor"] is not None else 0.0
-                kgdm_skor = int(round(max(0.0, min(100.0, 50 + 15 * z_mean[i] + 20 * z_sharpe[i] + 15 * z_cum[i] - v_pen))))
+    params = {
+        "fonKod": code,
+        "baslangic": start.strftime("%d-%m-%Y"),
+        "bitis": end.strftime("%d-%m-%Y"),
+    }
 
-                if kgdm_skor >= 60: karar, karar_sira = "GÜÇLÜ AL (≥60 Puan)", 1
-                elif kgdm_skor >= 40: karar, karar_sira = "ASIL LİSTE (40-59 Puan)", 2
-                elif kgdm_skor >= 25: karar, karar_sira = "NÖTR / İZLEME (25-39 Puan)", 3
-                else: karar, karar_sira = "ACİL SAT (<25 Puan)", 4
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 "
+            "(Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 "
+            "(KHTML, like Gecko) "
+            "Chrome/128 Safari/537.36"
+        ),
+        "Accept": (
+            "application/json,"
+            "text/plain,"
+            "*/*"
+        ),
+    }
 
-                item.update({"kgdm_skor": kgdm_skor, "karar": karar, "karar_sira": karar_sira})
+    try:
+        response = requests.get(
+            url,
+            params=params,
+            headers=headers,
+            timeout=HTTP_TIMEOUT,
+        )
 
-            calculated_funds.sort(key=lambda x: (x["karar_sira"], -x["kgdm_skor"]))
+        response.raise_for_status()
 
-            # Ortak gün sayısına hizalama
-            n_days = min(item["n_days"] for item in calculated_funds)
-            for item in calculated_funds:
-                item["dates"] = item["dates"][-n_days:]
-                item["daily_returns"] = item["daily_returns"][-n_days:]
-                item["running_scores"] = item["running_scores"][-n_days:]
+        payload = response.json()
+        values = payload.get("value")
 
-            if "KGDM3_Puanlama" in wb.sheetnames: del wb["KGDM3_Puanlama"]
-            ws_scores = wb.create_sheet(title="KGDM3_Puanlama")
+        if not isinstance(values, list) or not values:
+            return None
 
-            day_labels = calculated_funds[0]["dates"]
-            headers_scores = [
-                "Fon Kodu", "Valör (Excel)", "KGDM-3 Skor", "Model Kararı", 
-                "Ort. Getiri (%)", "Volatilite (%)", "Sharpe", 
-                "Fon Büyüklüğü (AUM ₺)", "Yatırımcı Sayısı", "Fiyat Kaynağı"
+        df = pd.DataFrame(values)
+
+        if (
+            "Tarih" not in df.columns
+            or "Fiyat" not in df.columns
+        ):
+            return None
+
+        df["date"] = pd.to_datetime(
+            df["Tarih"],
+            dayfirst=True,
+            errors="coerce",
+        )
+
+        df["price"] = df["Fiyat"].apply(parse_number)
+
+        df = df.dropna(
+            subset=[
+                "date",
+                "price",
             ]
-            for d in day_labels: headers_scores.append(f"{d} Skor")
-            for d in day_labels: headers_scores.append(f"{d} % Getiri")
+        )
 
-            ws_scores.append(headers_scores)
-            header_fill, header_font = PatternFill(start_color="1F4E79", fill_type="solid"), Font(name="Calibri", bold=True, color="FFFFFF")
-            for cell in ws_scores[1]: cell.fill, cell.font, cell.alignment = header_fill, header_font, Alignment(horizontal="center", vertical="center")
+        df = df[df["price"] > 0]
 
-            green_font, red_font, yellow_font = Font(bold=True, color="008000"), Font(bold=True, color="FF0000"), Font(bold=True, color="B8860B")
+        if len(df) < 2:
+            return None
 
-            scores_table_data = []
-            def format_money(val): return f"{val:,.0f} ₺".replace(",", ".") if val else "-"
-            def format_num(val): return f"{val:,}".replace(",", ".") if val else "-"
+        df = (
+            df.sort_values("date")
+            .drop_duplicates(
+                subset=["date"],
+                keep="last",
+            )
+            .tail(TARGET_TRADING_DAYS + 1)
+            .reset_index(drop=True)
+        )
 
-            for item in calculated_funds:
-                pct_strs = [f"+%{r:.2f}" if r > 0 else (f"-%{abs(r):.2f}" if r < 0 else "%0.00") for r in item["daily_returns"]]
-                
-                row_data = [
-                    item["code"], 
-                    item["valor"] if item["valor"] is not None else "-", 
-                    item["kgdm_skor"], item["karar"], 
-                    round(item["mean_return"], 3), round(item["volatility"], 3), round(item["sharpe_like"], 3), 
-                    format_money(item["aum"]), format_num(item["investors"]), item["data_source"]
-                ]
-                row_data += item["running_scores"] + pct_strs
-                ws_scores.append(row_data)
-                scores_table_data.append(row_data)
+        return df[["date", "price"]]
 
-            decision_col = 4 
-            n_meta_cols = 10  
-            return_cols_start = n_meta_cols + n_days + 1  
+    except (
+        requests.RequestException,
+        ValueError,
+        TypeError,
+    ):
+        return None
 
-            for row in ws_scores.iter_rows(min_row=2, max_row=len(calculated_funds) + 1, min_col=1, max_col=len(headers_scores)):
-                karar_val = str(row[decision_col - 1].value)
-                if "GÜÇLÜ AL" in karar_val or "ASIL LİSTE" in karar_val: row[decision_col - 1].font = green_font
-                elif "NÖTR" in karar_val: row[decision_col - 1].font = yellow_font
-                elif "ACİL SAT" in karar_val: row[decision_col - 1].font = red_font
 
-                for col_idx in range(return_cols_start, return_cols_start + n_days):
-                    val = str(row[col_idx - 1].value)
-                    if val.startswith("+"): row[col_idx - 1].font = green_font
-                    elif val.startswith("-"): row[col_idx - 1].font = red_font
+def fetch_fintables_series(
+    fund_code: str,
+) -> Optional[pd.DataFrame]:
+    code = normalize_fund_code(fund_code)
 
-            for sheet in [ws_list, ws_scores]:
-                for col in sheet.columns:
-                    sheet.column_dimensions[get_column_letter(col[0].column)].width = max((len(str(c.value or "")) for c in col), default=8) + 3
+    if not code:
+        return None
 
-            output = io.BytesIO()
-            wb.save(output)
-            output.seek(0)
+    url = (
+        "https://fintables.com/fonlar/"
+        f"{code.lower()}"
+    )
 
-            st.success("✅ Veri Şelalesi Başarılı! **Son 3 iş günü** performansı işlendi.")
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 "
+            "(Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 "
+            "(KHTML, like Gecko) "
+            "Chrome/128 Safari/537.36"
+        )
+    }
 
-            df_display = pd.DataFrame(scores_table_data, columns=headers_scores)
-            def color_cells(val):
-                s = str(val)
-                if "GÜÇLÜ AL" in s or "ASIL LİSTE" in s or s.startswith("+%"): return "color: #008000; font-weight: bold;"
-                if "NÖTR" in s: return "color: #B8860B; font-weight: bold;"
-                if "ACİL SAT" in s or s.startswith("-%"): return "color: #FF0000; font-weight: bold;"
-                return ""
+    try:
+        response = requests.get(
+            url,
+            headers=headers,
+            timeout=HTTP_TIMEOUT,
+        )
 
-            try: styled_df = df_display.style.map(color_cells)
-            except AttributeError: styled_df = df_display.style.applymap(color_cells)
+        if response.status_code != 200:
+            return None
 
-            st.dataframe(styled_df, use_container_width=True)
-            st.download_button(label="📥 Temiz ve Güvenli Tabloyu İndir (fonlar_guncel.xlsx)", data=output, file_name="fonlar_guncel.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        html = response.text
+
+        pattern = re.compile(
+            r'"date"\s*:\s*"'
+            r'(\d{4}-\d{2}-\d{2})'
+            r'"[^{}]{0,500}?'
+            r'"price"\s*:\s*'
+            r'([0-9]+(?:\.[0-9]+)?)',
+            re.IGNORECASE,
+        )
+
+        matches = pattern.findall(html)
+
+        if not matches:
+            return None
+
+        rows = []
+
+        for date_text, price_text in matches:
+            date_value = pd.to_datetime(
+                date_text,
+                errors="coerce",
+            )
+
+            price_value = parse_number(
+                price_text
+            )
+
+            if (
+                pd.notna(date_value)
+                and price_value is not None
+                and price_value > 0
+            ):
+                rows.append(
+                    {
+                        "date": date_value,
+                        "price": price_value,
+                    }
+                )
+
+        if not rows:
+            return None
+
+        df = pd.DataFrame(rows)
+
+        df = (
+            df.sort_values("date")
+            .drop_duplicates(
+                subset=["date"],
+                keep="last",
+            )
+        )
+
+        if len(df) < 2:
+            return None
+
+        return (
+            df.tail(TARGET_TRADING_DAYS + 1)
+            .reset_index(drop=True)
+        )
+
+    except (
+        requests.RequestException,
+        ValueError,
+        TypeError,
+        re.error,
+    ):
+        return None
+
+
+def compute_fund_metrics(
+    series: Optional[pd.DataFrame],
+) -> Optional[dict]:
+    if series is None or len(series) < 2:
+        return None
+
+    df = series.copy()
+
+    df["date"] = pd.to_datetime(
+        df["date"],
+        errors="coerce",
+    )
+
+    df["price"] = df["price"].apply(
+        parse_number
+    )
+
+    df = df.dropna(
+        subset=[
+            "date",
+            "price",
+        ]
+    )
+
+    df = df[df["price"] > 0]
+
+    df = (
+        df.sort_values("date")
+        .drop_duplicates(
+            subset=["date"],
+            keep="last",
+        )
+        .reset_index(drop=True)
+    )
+
+    if len(df) < 2:
+        return None
+
+    prices = (
+        df["price"]
+        .astype(float)
+        .tolist()
+    )
+
+    dates = (
+        df["date"]
+        .dt.strftime("%d.%m")
+        .tolist()
+    )
+
+    daily_returns = []
+
+    for previous, current in zip(
+        prices[:-1],
+        prices[1:],
+    ):
+        if previous <= 0:
+            daily_returns.append(0.0)
+        else:
+            daily_returns.append(
+                (current / previous - 1) * 100
+            )
+
+    if not daily_returns:
+        return None
+
+    mean_return = (
+        sum(daily_returns)
+        / len(daily_returns)
+    )
+
+    variance = (
+        sum(
+            (value - mean_return) ** 2
+            for value in daily_returns
+        )
+        / len(daily_returns)
+    )
+
+    volatility = variance ** 0.5
+
+    if volatility > 1e-12:
+        sharpe_like = (
+            mean_return / volatility
+        )
+    else:
+        sharpe_like = 0.0
+
+    cumulative_return = (
+        (prices[-1] / prices[0] - 1)
+        * 100
+    )
+
+    running_scores = []
+
+    for price in prices[1:]:
+        raw_score = (
+            50
+            + (
+                (price / prices[0] - 1)
+                * 100
+            )
+            * 5
+        )
+
+        score = int(
+            round(
+                max(
+                    0.0,
+                    min(
+                        100.0,
+                        raw_score,
+                    ),
+                )
+            )
+        )
+
+        running_scores.append(score)
+
+    return {
+        "dates": dates[1:],
+        "daily_returns": daily_returns,
+        "running_scores": running_scores,
+        "mean_return": mean_return,
+        "volatility": volatility,
+        "sharpe_like": sharpe_like,
+        "cumulative_return": cumulative_return,
+        "n_days": len(daily_returns),
+    }
+
+
+def zscore(
+    values: list[float],
+) -> list[float]:
+    if not values:
+        return []
+
+    clean_values = [
+        float(value)
+        for value in values
+        if value is not None
+        and pd.notna(value)
+    ]
+
+    if not clean_values:
+        return [0.0 for _ in values]
+
+    mean_value = (
+        sum(clean_values)
+        / len(clean_values)
+    )
+
+    variance = (
+        sum(
+            (value - mean_value) ** 2
+            for value in clean_values
+        )
+        / len(clean_values)
+    )
+
+    std = variance ** 0.5
+
+    if std < 1e-12:
+        return [0.0 for _ in values]
+
+    return [
+        (
+            float(value) - mean_value
+        ) / std
+        for value in values
+    ]
+
+
+def calculate_kgdm_score(
+    mean_z: float,
+    sharpe_z: float,
+    cumulative_z: float,
+    valor: Optional[int],
+) -> int:
+    valor_penalty = (
+        valor * 0.5
+        if valor is not None
+        else 0.0
+    )
+
+    raw_score = (
+        50
+        + 15 * mean_z
+        + 20 * sharpe_z
+        + 15 * cumulative_z
+        - valor_penalty
+    )
+
+    return int(
+        round(
+            max(
+                0.0,
+                min(
+                    100.0,
+                    raw_score,
+                ),
+            )
+        )
+    )
+
+
+def get_decision(
+    score: int,
+) -> tuple[str, int]:
+    if score >= 60:
+        return (
+            "GÜÇLÜ AL (≥60 Puan)",
+            1,
+        )
+
+    if score >= 40:
+        return (
+            "ASIL LİSTE (40-59 Puan)",
+            2,
+        )
+
+    if score >= 25:
+        return (
+            "NÖTR / İZLEME (25-39 Puan)",
+            3,
+        )
+
+    return (
+        "ACİL SAT (<25 Puan)",
+        4,
+    )
+
+
+def style_excel_sheet(ws):
+    thin_gray = Side(
+        style="thin",
+        color="D9E1F2",
+    )
+
+    for row in ws.iter_rows():
+        for cell in row:
+            cell.alignment = Alignment(
+                vertical="center",
+            )
+            cell.border = Border(
+                bottom=thin_gray
+            )
+
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+    ws.sheet_view.showGridLines = False
+
+
+def auto_fit_columns(
+    ws,
+    min_width: int = 10,
+    max_width: int = 45,
+):
+    for column_cells in ws.columns:
+        column_index = column_cells[0].column
+        max_length = 0
+
+        for cell in column_cells:
+            value = (
+                ""
+                if cell.value is None
+                else str(cell.value)
+            )
+
+            max_length = max(
+                max_length,
+                len(value),
+            )
+
+        width = max(
+            min_width,
+            min(
+                max_length + 3,
+                max_width,
+            ),
+        )
+
+        ws.column_dimensions[
+            get_column_letter(column_index)
+        ].width = width
+
+
+def create_excel_output(
+    wb,
+    ws_list,
+    calculated_funds,
+) -> io.BytesIO:
+
+    if "KGDM3_Puanlama" in wb.sheetnames:
+        del wb["KGDM3_Puanlama"]
+
+    ws_scores = wb.create_sheet(
+        title="KGDM3_Puanlama"
+    )
+
+    n_days = min(
+        item["n_days"]
+        for item in calculated_funds
+    )
+
+    for item in calculated_funds:
+        item["dates"] = item["dates"][-n_days:]
+        item["daily_returns"] = item[
+            "daily_returns"
+        ][-n_days:]
+        item["running_scores"] = item[
+            "running_scores"
+        ][-n_days:]
+
+    day_labels = calculated_funds[0]["dates"]
+
+    headers = [
+        "Fon Kodu",
+        "Valör (Excel)",
+        "KGDM-3 Skor",
+        "Model Kararı",
+        "Ort. Getiri (%)",
+        "Volatilite (%)",
+        "Sharpe",
+        "Kümülatif Getiri (%)",
+        "Fon Büyüklüğü (AUM ₺)",
+        "Yatırımcı Sayısı",
+        "Fiyat Kaynağı",
+    ]
+
+    for day in day_labels:
+        headers.append(
+            f"{day} Skor"
+        )
+
+    for day in day_labels:
+        headers.append(
+            f"{day} % Getiri"
+        )
+
+    ws_scores.append(headers)
+
+    header_fill = PatternFill(
+        start_color=COLOR_NAVY,
+        fill_type="solid",
+    )
+
+    header_font = Font(
+        name="Calibri",
+        bold=True,
+        color=COLOR_WHITE,
+    )
+
+    for cell in ws_scores[1]:
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(
+            horizontal="center",
+            vertical="center",
+            wrap_text=True,
+        )
+
+    ws_scores.row_dimensions[1].height = 34
+
+    for item in calculated_funds:
+        row_data = [
+            item["code"],
+            (
+                item["valor"]
+                if item["valor"] is not None
+                else None
+            ),
+            item["kgdm_skor"],
+            item["karar"],
+            round(item["mean_return"], 4),
+            round(item["volatility"], 4),
+            round(item["sharpe_like"], 4),
+            round(item["cumulative_return"], 4),
+            (
+                round(item["aum"], 2)
+                if item["aum"]
+                else None
+            ),
+            (
+                int(item["investors"])
+                if item["investors"]
+                else None
+            ),
+            item["data_source"],
+        ]
+
+        row_data.extend(
+            item["running_scores"]
+        )
+
+        row_data.extend(
+            [
+                format_percent(value)
+                for value in item["daily_returns"]
+            ]
+        )
+
+        ws_scores.append(row_data)
+
+    COL_VALOR = 2
+    COL_SCORE = 3
+    COL_DECISION = 4
+    COL_MEAN = 5
+    COL_VOL = 6
+    COL_SHARPE = 7
+    COL_CUM = 8
+    COL_AUM = 9
+    COL_INVESTORS = 10
+
+    SCORE_START = 12
+    RETURN_START = SCORE_START + n_days
+
+    green_font = Font(
+        bold=True,
+        color=COLOR_GREEN,
+    )
+
+    red_font = Font(
+        bold=True,
+        color=COLOR_RED,
+    )
+
+    yellow_font = Font(
+        bold=True,
+        color=COLOR_YELLOW,
+    )
+
+    for row_number in range(
+        2,
+        ws_scores.max_row + 1,
+    ):
+        ws_scores.cell(
+            row=row_number,
+            column=COL_AUM,
+        ).number_format = '#,##0.00 "₺"'
+
+        ws_scores.cell(
+            row=row_number,
+            column=COL_INVESTORS,
+        ).number_format = '#,##0'
+
+        ws_scores.cell(
+            row=row_number,
+            column=COL_VALOR,
+        ).number_format = '0'
+
+        for col in [
+            COL_MEAN,
+            COL_VOL,
+            COL_SHARPE,
+            COL_CUM,
+        ]:
+            ws_scores.cell(
+                row=row_number,
+                column=col,
+            ).number_format = '0.0000'
+
+        ws_scores.cell(
+            row=row_number,
+            column=COL_SCORE,
+        ).number_format = '0'
+
+        decision_cell = ws_scores.cell(
+            row=row_number,
+            column=COL_DECISION,
+        )
+
+        decision_text = str(
+            decision_cell.value
+        )
+
+        if (
+            "GÜÇLÜ AL" in decision_text
+            or "ASIL LİSTE" in decision_text
+        ):
+            decision_cell.font = green_font
+
+        elif "NÖTR" in decision_text:
+            decision_cell.font = yellow_font
+
+        elif "ACİL SAT" in decision_text:
+            decision_cell.font = red_font
+
+        for col in range(
+            RETURN_START,
+            RETURN_START + n_days,
+        ):
+            cell = ws_scores.cell(
+                row=row_number,
+                column=col,
+            )
+
+            value = str(cell.value)
+
+            if value.startswith("+"):
+                cell.font = green_font
+            elif value.startswith("-"):
+                cell.font = red_font
+
+    score_range = (
+        f"C2:C{ws_scores.max_row}"
+    )
+
+    ws_scores.conditional_formatting.add(
+        score_range,
+        CellIsRule(
+            operator="greaterThanOrEqual",
+            formula=["60"],
+            fill=PatternFill(
+                start_color=COLOR_LIGHT_GREEN,
+                fill_type="solid",
+            ),
+        ),
+    )
+
+    ws_scores.conditional_formatting.add(
+        score_range,
+        CellIsRule(
+            operator="between",
+            formula=["40", "59"],
+            fill=PatternFill(
+                start_color="EAF4E3",
+                fill_type="solid",
+            ),
+        ),
+    )
+
+    ws_scores.conditional_formatting.add(
+        score_range,
+        CellIsRule(
+            operator="between",
+            formula=["25", "39"],
+            fill=PatternFill(
+                start_color=COLOR_LIGHT_YELLOW,
+                fill_type="solid",
+            ),
+        ),
+    )
+
+    ws_scores.conditional_formatting.add(
+        score_range,
+        CellIsRule(
+            operator="lessThan",
+            formula=["25"],
+            fill=PatternFill(
+                start_color=COLOR_LIGHT_RED,
+                fill_type="solid",
+            ),
+        ),
+    )
+
+    style_excel_sheet(ws_scores)
+    auto_fit_columns(ws_scores)
+
+    for col in range(
+        SCORE_START,
+        ws_scores.max_column + 1,
+    ):
+        ws_scores.column_dimensions[
+            get_column_letter(col)
+        ].width = 13
+
+    style_excel_sheet(ws_list)
+    auto_fit_columns(ws_list)
+
+    output = io.BytesIO()
+
+    wb.save(output)
+
+    output.seek(0)
+
+    return output
+
+
+uploaded_file = st.file_uploader(
+    "Excel Dosyanızı Yükleyin (fonlar.xlsx):",
+    type=["xlsx"],
+)
+
+if uploaded_file is None:
+    st.info(
+        "Başlamak için Fon_Listesi sayfasını içeren "
+        "Excel dosyanızı yükleyin."
+    )
+
+    st.markdown(
+        """
+### Excel formatı
+
+`Fon_Listesi` sayfasında:
+
+| A sütunu | D sütunu |
+|---|---|
+| Fon Kodu | Valör |
+
+Örnek:
+
+```text
+Fon Kodu    ...    ...    Valör
+AFT                      1
+MAC                      2
+TCD                      3
+
+    """
+)
+
+st.stop()
+
+try:
+wb = openpyxl.load_workbook(
+uploaded_file
+)
+except Exception as exc:
+st.error(
+f"Excel dosyası okunamadı: {exc}"
+)
+st.stop()
+
+if "Fon_Listesi" not in wb.sheetnames:
+st.error(
+"Yüklenen dosyada "
+"'Fon_Listesi' sayfası bulunamadı!"
+)
+st.stop()
+
+ws_list = wb["Fon_Listesi"]
+
+requested_codes = []
+excel_valor_dict = {}
+
+for row in ws_list.iter_rows(
+min_row=2,
+values_only=False,
+):
+if not row:
+continue
+
+code_cell = row[0]
+
+valor_cell = (
+    row[3]
+    if len(row) > 3
+    else None
+)
+
+code = normalize_fund_code(
+    code_cell.value
+)
+
+if not code:
+    continue
+
+requested_codes.append(code)
+
+valor = None
+
+if (
+    valor_cell is not None
+    and valor_cell.value is not None
+    and str(valor_cell.value).strip()
+):
+    parsed_valor = parse_number(
+        valor_cell.value
+    )
+
+    if parsed_valor is not None:
+        valor = int(
+            round(parsed_valor)
+        )
+
+excel_valor_dict[code] = valor
+
+requested_codes = list(
+dict.fromkeys(
+requested_codes
+)
+)
+
+if not requested_codes:
+st.warning(
+"Fon_Listesi sayfasında fon kodu bulunamadı."
+)
+st.stop()
+
+st.subheader("📋 Analiz Özeti")
+
+summary_col1, summary_col2, summary_col3 = st.columns(3)
+
+with summary_col1:
+st.metric(
+"Analiz Edilecek Fon",
+len(requested_codes),
+)
+
+with summary_col2:
+st.metric(
+"Hedef İşlem Günü",
+TARGET_TRADING_DAYS,
+)
+
+with summary_col3:
+st.metric(
+"Veri Penceresi",
+f"{LOOKBACK_CALENDAR_DAYS} gün",
+)
+
+today = dt.date.today()
+
+start_date = (
+today
+- dt.timedelta(
+days=LOOKBACK_CALENDAR_DAYS
+)
+)
+
+with st.spinner(
+"🔄 TEFAS verileri çekiliyor..."
+):
+universe = fetch_tefas_universe(
+start_date,
+today,
+)
+
+if universe.empty:
+st.error(
+"""
+TEFAS verisi alınamadı.
+
+Kontrol edin:
+
+pytefas kurulu mu?
+İnternet bağlantısı var mı?
+TEFAS API erişilebilir mi?
+pytefas güncel mi?
+Kurulum:
+
+pip install -U pytefas
+"""
+)
+st.stop()
+
+available_codes = set(
+universe["code"]
+.astype(str)
+.str.upper()
+.unique()
+)
+
+found_in_tefas = [
+code
+for code in requested_codes
+if code in available_codes
+]
+
+missing_from_tefas = [
+code
+for code in requested_codes
+if code not in available_codes
+]
+
+col1, col2, col3 = st.columns(3)
+
+with col1:
+st.metric(
+"TEFAS'ta Bulunan",
+len(found_in_tefas),
+)
+
+with col2:
+st.metric(
+"TEFAS'ta Bulunamayan",
+len(missing_from_tefas),
+)
+
+with col3:
+st.metric(
+"TEFAS Kayıt Sayısı",
+len(universe),
+)
+
+if missing_from_tefas:
+with st.expander(
+"⚠️ TEFAS'ta bulunamayan fonlar"
+):
+st.write(
+", ".join(
+missing_from_tefas
+)
+)
+
+calculated_funds = []
+source_errors = []
+
+progress = st.progress(
+0,
+text="Fonlar analiz ediliyor...",
+)
+
+total_funds = len(
+requested_codes
+)
+
+for index, code in enumerate(
+requested_codes,
+start=1,
+):
+series = None
+data_source = "Bulunamadı"
+
+if not universe.empty:
+    series = get_fund_series(
+        universe,
+        code,
+    )
+
+    if series is not None:
+        data_source = "TEFAS"
+
+if series is None:
+    series = fetch_isyatirim_series(
+        code
+    )
+
+    if series is not None:
+        data_source = "İş Yatırım"
+
+if series is None:
+    series = fetch_fintables_series(
+        code
+    )
+
+    if series is not None:
+        data_source = "Fintables"
+
+metrics = compute_fund_metrics(
+    series
+)
+
+if metrics is None:
+    source_errors.append(
+        {
+            "code": code,
+            "source": data_source,
+            "reason": (
+                "Yeterli fiyat verisi "
+                "bulunamadı."
+            ),
+        }
+    )
+
+    progress.progress(
+        index / total_funds,
+        text=(
+            f"{code} işlenemedi..."
+        ),
+    )
+
+    continue
+
+extra_data = get_latest_fund_info(
+    universe,
+    code,
+)
+
+final_valor = (
+    excel_valor_dict.get(code)
+)
+
+calculated_funds.append(
+    {
+        "code": code,
+        "data_source": data_source,
+        "valor": final_valor,
+        "aum": extra_data["aum"],
+        "investors": extra_data["investors"],
+        **metrics,
+    }
+)
+
+progress.progress(
+    index / total_funds,
+    text=(
+        f"{code} işleniyor "
+        f"({index}/{total_funds})"
+    ),
+)
+
+progress.empty()
+
+if not calculated_funds:
+st.error(
+"""
+Hiçbir fon hesaplanamadı.
+
+Muhtemel nedenler:
+
+Fon kodları hatalı.
+
+TEFAS veri erişimi başarısız.
+
+İş Yatırım fallback'i veri döndürmedi.
+
+Fintables veri yapısı değişmiş.
+
+Fon için yeterli işlem günü bulunamadı.
+"""
+)
+
+if source_errors:
+st.subheader(
+"Hata Detayları"
+)
+
+  st.dataframe(
+      pd.DataFrame(
+          source_errors
+      ),
+      use_container_width=True,
+  )
+
+st.stop()
+
+mean_returns = [
+item["mean_return"]
+for item in calculated_funds
+]
+
+sharpes = [
+item["sharpe_like"]
+for item in calculated_funds
+]
+
+cumulative_returns = [
+item["cumulative_return"]
+for item in calculated_funds
+]
+
+multi_fund = (
+len(calculated_funds) > 1
+)
+
+if multi_fund:
+z_mean = zscore(
+mean_returns
+)
+
+z_sharpe = zscore(
+    sharpes
+)
+
+z_cumulative = zscore(
+    cumulative_returns
+)
+
+else:
+z_mean = [0.0]
+z_sharpe = [0.0]
+z_cumulative = [0.0]
+
+for index, item in enumerate(
+calculated_funds
+):
+score = calculate_kgdm_score(
+mean_z=z_mean[index],
+sharpe_z=z_sharpe[index],
+cumulative_z=z_cumulative[index],
+valor=item["valor"],
+)
+
+decision, decision_order = (
+    get_decision(score)
+)
+
+item.update(
+    {
+        "kgdm_skor": score,
+        "karar": decision,
+        "karar_sira": decision_order,
+        "z_mean": z_mean[index],
+        "z_sharpe": z_sharpe[index],
+        "z_cumulative": z_cumulative[index],
+    }
+)
+
+calculated_funds.sort(
+key=lambda item: (
+item["karar_sira"],
+-item["kgdm_skor"],
+-item["cumulative_return"],
+)
+)
+
+n_days = min(
+item["n_days"]
+for item in calculated_funds
+)
+
+for item in calculated_funds:
+item["dates"] = item["dates"][-n_days:]
+item["daily_returns"] = (
+item["daily_returns"][-n_days:]
+)
+item["running_scores"] = (
+item["running_scores"][-n_days:]
+)
+
+display_rows = []
+
+for item in calculated_funds:
+display_rows.append(
+{
+"Fon": item["code"],
+"KGDM-3": item["kgdm_skor"],
+"Karar": item["karar"],
+"Ort. Getiri %": round(
+item["mean_return"],
+3,
+),
+"Volatilite %": round(
+item["volatility"],
+3,
+),
+"Sharpe": round(
+item["sharpe_like"],
+3,
+),
+"Kümülatif Getiri %": round(
+item["cumulative_return"],
+3,
+),
+"AUM ₺": (
+round(
+item["aum"],
+0,
+)
+if item["aum"]
+else 0
+),
+"Yatırımcı": item[
+"investors"
+],
+"Valör": (
+item["valor"]
+if item["valor"] is not None
+else "-"
+),
+"Kaynak": item[
+"data_source"
+],
+}
+)
+
+df_display = pd.DataFrame(
+display_rows
+)
+
+def color_cells(value):
+text = str(value)
+
+if (
+    "GÜÇLÜ AL" in text
+    or "ASIL LİSTE" in text
+):
+    return (
+        "color: #008000; "
+        "font-weight: bold;"
+    )
+
+if "NÖTR" in text:
+    return (
+        "color: #B8860B; "
+        "font-weight: bold;"
+    )
+
+if "ACİL SAT" in text:
+    return (
+        "color: #FF0000; "
+        "font-weight: bold;"
+    )
+
+return ""
+
+try:
+styled_df = (
+df_display.style.map(
+color_cells
+)
+)
+except AttributeError:
+styled_df = (
+df_display.style.applymap(
+color_cells
+)
+)
+
+st.subheader(
+"📊 KGDM-3 Fon Sonuçları"
+)
+
+st.dataframe(
+styled_df,
+use_container_width=True,
+hide_index=True,
+)
+
+strong_buy_count = sum(
+item["kgdm_skor"] >= 60
+for item in calculated_funds
+)
+
+main_list_count = sum(
+40 <= item["kgdm_skor"] < 60
+for item in calculated_funds
+)
+
+neutral_count = sum(
+25 <= item["kgdm_skor"] < 40
+for item in calculated_funds
+)
+
+sell_count = sum(
+item["kgdm_skor"] < 25
+for item in calculated_funds
+)
+
+st.subheader(
+"📌 Karar Dağılımı"
+)
+
+c1, c2, c3, c4 = st.columns(4)
+
+with c1:
+st.metric(
+"🟢 Güçlü Al",
+strong_buy_count,
+)
+
+with c2:
+st.metric(
+"🟢 Asıl Liste",
+main_list_count,
+)
+
+with c3:
+st.metric(
+"🟡 Nötr",
+neutral_count,
+)
+
+with c4:
+st.metric(
+"🔴 Acil Sat",
+sell_count,
+)
+
+source_df = pd.DataFrame(
+[
+{
+"Fon": item["code"],
+"Kaynak": item["data_source"],
+}
+for item in calculated_funds
+]
+)
+
+source_distribution = (
+source_df["Kaynak"]
+.value_counts()
+.rename_axis("Kaynak")
+.reset_index(
+name="Fon Sayısı"
+)
+)
+
+with st.expander(
+"🔎 Veri Kaynağı Dağılımı"
+):
+st.dataframe(
+source_distribution,
+use_container_width=True,
+hide_index=True,
+)
+
+if source_errors:
+with st.expander(
+f"⚠️ Veri alınamayan fonlar "
+f"({len(source_errors)})"
+):
+st.dataframe(
+pd.DataFrame(
+source_errors
+),
+use_container_width=True,
+hide_index=True,
+)
+
+output = create_excel_output(
+wb=wb,
+ws_list=ws_list,
+calculated_funds=calculated_funds,
+)
+
+st.success(
+f"✅ Analiz tamamlandı. "
+f"{len(calculated_funds)} fon hesaplandı."
+)
+
+st.download_button(
+label=(
+"📥 Güncellenmiş Excel'i İndir"
+),
+data=output,
+file_name="fonlar_guncel.xlsx",
+mime=(
+"application/vnd.openxmlformats-officedocument."
+"spreadsheetml.sheet"
+),
+)
+
+st.caption(
+f"KGDM-3 Fon Analiz Otomasyonu "
+f"v{APP_VERSION} | "
+f"Analiz tarihi: "
+f"{today.strftime('%d.%m.%Y')}"
+)
+
+st.caption(
+"⚠️ KGDM-3 skoru teknik bir model puanıdır; "
+"yatırım tavsiyesi değildir."
+)
