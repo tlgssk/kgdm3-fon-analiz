@@ -17,13 +17,15 @@ st.set_page_config(
 st.title("📊 KGDM-3 Fon Analiz ve Excel Otomasyonu")
 st.caption(
     "Türkiye'nin en gelişmiş portföy analiz aracı. "
-    "Farklı açık kaynaklardan (TEFAS, İş Yatırım, Fintables vb.) veri şelalesi "
-    "kullanarak fonları puanlar. AUM (Fon Büyüklüğü) ve Yatırımcı Sayısı verilerini entegre eder."
+    "Farklı açık kaynaklardan veri şelalesi kullanarak fonları **son 3 iş günü** "
+    "üzerinden puanlar. AUM ve Yatırımcı Sayısı verilerini entegre eder."
 )
 
 FUND_KINDS = ["YAT", "EMK", "BYF"]
-LOOKBACK_CALENDAR_DAYS = 20
-TARGET_TRADING_DAYS = 10
+# 3 iş günü verisi bulabilmek için hafta sonları/tatilleri gözeterek takvim gününü 10 olarak ayarlıyoruz
+LOOKBACK_CALENDAR_DAYS = 10 
+# İstenen hedef iş günü sayısını 3'e düşürdük
+TARGET_TRADING_DAYS = 3
 
 # ---------------------------------------------------------------------------
 # ŞELALE VERİ ÇEKME MOTORU VE EKSTRA METRİKLER (API KEY GEREKTİRMEZ)
@@ -86,7 +88,7 @@ def fetch_pytefas_data(fund_code: str) -> dict:
 def fetch_isyatirim_series(fund_code: str) -> pd.DataFrame | None:
     """KAYNAK 3: İş Yatırım (API Key İstemez)"""
     end = datetime.datetime.now()
-    start = end - datetime.timedelta(days=30)
+    start = end - datetime.timedelta(days=15)
     try:
         url = "https://www.isyatirim.com.tr/_layouts/15/IsYatirim.Website/Common/Data.aspx/YatirimFonGecmisGetiri"
         res = requests.get(url, params={"fonKod": fund_code, "baslangic": start.strftime("%d-%m-%Y"), "bitis": end.strftime("%d-%m-%Y")}, headers={'User-Agent': 'Mozilla/5.0'}, timeout=3)
@@ -130,12 +132,14 @@ def try_other_fallbacks(fund_code: str) -> pd.DataFrame | None:
             if res.status_code == 200:
                 prices = re.findall(regex, res.text)
                 if len(prices) >= 2:
-                    return pd.DataFrame({"date": pd.date_range(end=datetime.date.today(), periods=len(prices)), "price": [float(p) for p in prices]})
+                    # En az 2 nokta bulunursa son 3 iş günü hedefini yakalamaya çalışıyoruz
+                    # Yetmezse de elimizdekini döndürüyoruz.
+                    return pd.DataFrame({"date": pd.date_range(end=datetime.date.today(), periods=len(prices)), "price": [float(p) for p in prices]}).tail(TARGET_TRADING_DAYS + 1).reset_index(drop=True)
         except Exception: continue
     return None
 
 # ---------------------------------------------------------------------------
-# HESAPLAMALAR VE METRİKLER
+# HESAPLAMALAR VE METRİKLER (3 Günlük Odak)
 # ---------------------------------------------------------------------------
 
 def compute_fund_metrics(series: pd.DataFrame) -> dict | None:
@@ -196,6 +200,8 @@ if uploaded_file is not None:
         if not requested_codes:
             st.warning("Fon_Listesi sayfasında fon kodu bulunamadı.")
         else:
+            # Tarih uyuşmazlığını engellemek için 2024 yılına sabitlenebilir. 
+            # Ancak kodun her zaman taze kalması için today() metodunu tutuyoruz.
             today = datetime.date.today()
             start_date = today - datetime.timedelta(days=LOOKBACK_CALENDAR_DAYS)
 
@@ -274,6 +280,7 @@ if uploaded_file is not None:
 
             calculated_funds.sort(key=lambda x: (x["karar_sira"], -x["kgdm_skor"]))
 
+            # Ortak gün sayısına hizalama
             n_days = min(item["n_days"] for item in calculated_funds)
             for item in calculated_funds:
                 item["dates"] = item["dates"][-n_days:]
@@ -339,7 +346,7 @@ if uploaded_file is not None:
             wb.save(output)
             output.seek(0)
 
-            st.success("✅ Veri Şelalesi Başarılı! Fiyatlar, AUM (Büyüklük) ve Yatırımcı Sayısı sorunsuz işlendi.")
+            st.success("✅ Veri Şelalesi Başarılı! **Son 3 iş günü** performansı işlendi.")
 
             df_display = pd.DataFrame(scores_table_data, columns=headers_scores)
             def color_cells(val):
