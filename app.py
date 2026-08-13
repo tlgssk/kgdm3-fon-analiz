@@ -14,12 +14,11 @@ st.set_page_config(
 
 st.title('📊 KGDM-3 Fon Analiz ve Excel Otomasyonu')
 st.caption(
-    'Fon_Listesi sayfasındaki fonları tamamlar, TEFAS engellerine karşı akıllı'
-    ' yedek sistemle çalışır, skorları ve % getirileri gruplayarak sıralar.'
+    'Fon_Listesi sayfasındaki fonları tamamlar, TEFAS API engellerine karşı yedek'
+    ' sistemle çalışır, skorları ve % getirileri renkli olarak ekrana yansıtır.'
 )
 
 # 1. KAPSAMLI TEFAS RESMİ VERİTABANI VE YEDEK (FALLBACK) GETİRİLER
-# Eğer TEFAS bulut sunucunuzu engellerse %0.00 yerine bu gerçekçi veriler devreye girer.
 TEFAS_DATABASE = {
     'PNU': {'adi': 'Pardus Portföy TL Para Piyasası Fonu', 'valor': 0, 'kazrisk': 52, 'makro': 30, 'aksiyon': 'Likit Ana Depo', 'daily_returns': [0.11, 0.12, 0.11, 0.11, 0.12, 0.11, 0.11, 0.12, 0.11, 0.11]},
     'VK6': {'adi': 'Vakıf Portföy TL Para Piyasası Fonu', 'valor': 0, 'kazrisk': 40, 'makro': 30, 'aksiyon': 'Likit Çapa', 'daily_returns': [0.10, 0.11, 0.10, 0.10, 0.11, 0.10, 0.10, 0.11, 0.10, 0.10]},
@@ -77,7 +76,6 @@ def fetch_real_tefas_returns(fund_code, fallback_returns):
     except Exception:
         pass
     
-    # EĞER TEFAS STREAMLIT BULUT SUNUCUSUNU ENGELLERSE YEDEK VERİ DÖNER
     return fallback_returns
 
 def fetch_official_tefas_name(fund_code):
@@ -96,7 +94,7 @@ def fetch_official_tefas_name(fund_code):
     pass
   return f'{fund_code} Yatırım Fonu'
 
-# 3. EXCEL İŞLEMLERİ
+# 3. EXCEL VE HESAPLAMA İŞLEMLERİ
 uploaded_file = st.file_uploader('Excel Dosyanızı Yükleyin (fonlar.xlsx):', type=['xlsx'])
 
 if uploaded_file is not None:
@@ -123,7 +121,6 @@ if uploaded_file is not None:
         if valor_cell.value is None:
           valor_cell.value = db_info['valor']
 
-        # CANLI VERİYİ ÇEK VEYA YEDEK VERİYİ KULLAN
         fallback_data = db_info.get('daily_returns', [0.10]*10)
         live_returns = fetch_real_tefas_returns(code, fallback_data)
 
@@ -152,13 +149,13 @@ if uploaded_file is not None:
       daily_scores = [0.0] * 10
       daily_scores[-1] = kgdm_skor
 
-      # Getiri Oranlarına Göre Geriye Dönük Net Skor Hesaplaması
       for i in range(8, -1, -1):
         ret_val = raw_returns[i + 1]
         score_change = ret_val * 1.5
         prev_score = daily_scores[i + 1] - score_change
         daily_scores[i] = round(min(100, max(-50, prev_score)), 1)
 
+      # Getirilerin Formatlanması (Pozitif, Negatif)
       price_pct_changes = [f'+%{ret:.2f}' if ret > 0 else f'-%{abs(ret):.2f}' if ret < 0 else '%0.00' for ret in raw_returns]
 
       calculated_funds.append({
@@ -178,7 +175,6 @@ if uploaded_file is not None:
       curr -= datetime.timedelta(days=1)
     business_days.reverse()
 
-    # BAŞLIKLARI GRUPLANDIRMA (Skorlar Yan Yana -> % Getiriler Yan Yana)
     headers_scores = ['Fon Kodu', 'Fon Adı', 'Valör', 'KGDM-3 Anlık Skor', 'Model Kararı']
     for b_day in business_days: headers_scores.append(f'{b_day} Skor')
     for b_day in business_days: headers_scores.append(f'{b_day} % Getiri')
@@ -191,32 +187,28 @@ if uploaded_file is not None:
     for cell in ws_scores[1]:
       cell.fill, cell.font, cell.alignment = header_fill, header_font, Alignment(horizontal='center', vertical='center')
 
-    # VERİLERİ GRUPLANDIRARAK YAZMA
     scores_table_data = []
     for item in calculated_funds:
       row_data = [item['code'], item['name'], item['valor'], item['kgdm_skor'], item['karar']]
-      
-      # 1. 10 günlük skorlar
       for d_idx in range(10): row_data.append(item['daily_scores'][d_idx])
-        
-      # 2. 10 günlük fiyat getirileri
       for d_idx in range(10): row_data.append(item['price_pct_changes'][d_idx])
-        
       row_data.append(item['aksiyon'])
       ws_scores.append(row_data)
       scores_table_data.append(row_data)
 
-    green_font, red_font, yellow_font = Font(name='Calibri', bold=True, color='375623'), Font(name='Calibri', bold=True, color='C65911'), Font(name='Calibri', color='7F6000')
+    # Düzeltilmiş Açık Renk Kodları
+    green_font = Font(name='Calibri', bold=True, color='008000') # Yeşil
+    red_font = Font(name='Calibri', bold=True, color='FF0000')   # Tam Kırmızı
+    yellow_font = Font(name='Calibri', bold=True, color='B8860B') # Koyu Sarı / Nötr
 
+    # EXCEL İÇİ RENKLENDİRME
     for row in ws_scores.iter_rows(min_row=2, max_row=len(calculated_funds) + 1, min_col=1, max_col=len(headers_scores)):
-      # Karar Sütunu Renklendirmesi
       karar_cell = row[4]
       val = str(karar_cell.value)
       if 'GÜÇLÜ AL' in val or 'ASIL LİSTE' in val: karar_cell.font = green_font
       elif 'NÖTR' in val: karar_cell.font = yellow_font
       elif 'ACİL SAT' in val: karar_cell.font = red_font
 
-      # % Getiriler Renklendirmesi (Skorlardan Sonra Başlar: İndeks 15 ile 24 arası)
       for col_idx in range(15, 25): 
         ret_cell, ret_val = row[col_idx], str(row[col_idx].value)
         if ret_val.startswith('+'): ret_cell.font = green_font
@@ -230,6 +222,26 @@ if uploaded_file is not None:
     wb.save(output)
     output.seek(0)
 
-    st.success('✅ Hata tamamen giderildi! TEFAS API bağlantısı engellense bile sistem yedek veritabanını kullanarak tablonun kusursuz çalışmasını sağlar.')
-    st.dataframe(pd.DataFrame(scores_table_data, columns=headers_scores), use_container_width=True)
-    st.download_button(label='📥 Düzeltilmiş Tabloyu İndir (fonlar_guncel.xlsx)', data=output, file_name='fonlar_guncel.xlsx', mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    st.success('✅ Eksi getiriler hem Streamlit ekranında hem de Excel dosyasında başarılı bir şekilde Kırmızıya boyandı!')
+
+    # EKRAN (STREAMLIT UI) İÇİN PANDAS STYLER RENKLENDİRMESİ
+    df_display = pd.DataFrame(scores_table_data, columns=headers_scores)
+
+    def color_cells(val):
+        val_str = str(val)
+        if 'GÜÇLÜ AL' in val_str or 'ASIL LİSTE' in val_str or val_str.startswith('+%'):
+            return 'color: #008000; font-weight: bold;'
+        elif 'NÖTR' in val_str:
+            return 'color: #B8860B; font-weight: bold;'
+        elif 'ACİL SAT' in val_str or val_str.startswith('-%'):
+            return 'color: #FF0000; font-weight: bold;'
+        return ''
+
+    # Pandas versiyonuna uygun stil haritalama (.map() veya .applymap())
+    try:
+        styled_df = df_display.style.map(color_cells)
+    except AttributeError:
+        styled_df = df_display.style.applymap(color_cells)
+
+    st.dataframe(styled_df, use_container_width=True)
+    st.download_button(label='📥 Tam Renkli Tabloyu İndir (fonlar_guncel.xlsx)', data=output, file_name='fonlar_guncel.xlsx', mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
