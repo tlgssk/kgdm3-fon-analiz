@@ -4,6 +4,7 @@ import time
 
 import openpyxl
 import pandas as pd
+import requests
 import streamlit as st
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
@@ -15,12 +16,28 @@ st.set_page_config(
 st.title("📊 KGDM-3 Fon Analiz ve Excel Otomasyonu")
 st.caption(
     "Excel dosyasındaki fonları gerçek TEFAS verisiyle (tefas-crawler) "
-    "analiz eder; risk-ayarlı, göreli bir skorla gruplar."
+    "analiz eder; risk-ayarlı, göreli bir skorla gruplar. TEFAS'ta "
+    "bulunamayan/başarısız olan fonlar için isteğe bağlı Fonoloji API "
+    "yedeği kullanılır."
 )
 
 FUND_KINDS = ["YAT", "EMK", "BYF"]  # Menkul Kıymet Yatırım Fonu, Emeklilik, Borsa Yatırım Fonu
 LOOKBACK_CALENDAR_DAYS = 20          # ~10 iş günü elde etmek için tampon
 TARGET_TRADING_DAYS = 10
+
+FONOLOJI_BASE_URL = "https://fonoloji.com/v1"
+
+with st.sidebar:
+    st.subheader("⚙️ Ayarlar")
+    fonoloji_api_key = st.text_input(
+        "Fonoloji API Anahtarı (isteğe bağlı, yedek kaynak için)",
+        type="password",
+        help=(
+            "TEFAS'tan veri çekilemeyen fonlar için yedek kaynak olarak "
+            "kullanılır. Ücretsiz anahtar: https://fonoloji.com/kayit — "
+            "boş bırakılırsa TEFAS'ta bulunamayan fonlar analiz dışı kalır."
+        ),
+    )
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 30)
@@ -137,6 +154,79 @@ def compute_fund_metrics(series: pd.DataFrame) -> dict | None:
     }
 
 
+def fetch_fonoloji_series(fund_code: str, api_key: str) -> pd.DataFrame | None:
+    """TEFAS'ta bulunamayan/başarısız olan fonlar için Fonoloji API'sinden
+    (https://fonoloji.com/api-docs) NAV geçmişini çeker. TEFAS'la aynı
+    işlem mantığına (compute_fund_metrics) girecek şekilde bir DataFrame
+    döndürür: date, price, title. Ayrıca resmi risk değeri gibi ekstra
+    alanları da fonksiyon dışına döndürmek için (df, extra_info) tuple'ı
+    kullanılır.
+    """
+    headers = {"X-API-Key": api_key}
+
+    try:
+        detail_resp = requests.get(
+            f"{FONOLOJI_BASE_URL}/funds/{fund_code}", headers=headers, timeout=10
+        )
+    except requests.RequestException as exc:
+        st.warning(f"Fonoloji'ye bağlanılamadı ({fund_code}): {exc}")
+        return None, {}
+
+    if detail_resp.status_code == 401:
+        st.error("Fonoloji API anahtarı geçersiz.")
+        return None, {}
+    if detail_resp.status_code == 429:
+        st.warning(f"Fonoloji kota sınırına takıldı ({fund_code}), atlanıyor.")
+        return None, {}
+    if detail_resp.status_code == 404:
+        return None, {}
+    if detail_resp.status_code != 200:
+        st.warning(
+            f"Fonoloji'den {fund_code} için beklenmeyen yanıt: {detail_resp.status_code}"
+        )
+        return None, {}
+
+    detail = detail_resp.json().get("fund", {})
+    fund_name = detail.get("name")
+    risk_score = detail.get("risk_score")
+
+    try:
+        hist_resp = requests.get(
+            f"{FONOLOJI_BASE_URL}/funds/{fund_code}/history",
+            headers=headers,
+            params={"period": "1m"},
+            timeout=10,
+        )
+    except requests.RequestException as exc:
+        st.warning(f"Fonoloji geçmiş verisi alınamadı ({fund_code}): {exc}")
+        return None, {}
+
+    if hist_resp.status_code != 200:
+        st.warning(
+            f"Fonoloji geçmiş verisi alınamadı ({fund_code}): {hist_resp.status_code}"
+        )
+        return None, {}
+
+    points = hist_resp.json().get("points", [])
+    if not points:
+        return None, {}
+
+    df = pd.DataFrame(points)
+    if "date" not in df.columns or "price" not in df.columns:
+        return None, {}
+
+    df["date"] = pd.to_datetime(df["date"])
+    df["price"] = pd.to_numeric(df["price"], errors="coerce")
+    df = df.dropna(subset=["price"]).sort_values("date")
+    df["title"] = fund_name or fund_code
+    df["code"] = fund_code
+
+    if len(df) > TARGET_TRADING_DAYS + 1:
+        df = df.tail(TARGET_TRADING_DAYS + 1)
+
+    return df.reset_index(drop=True), {"risk_score": risk_score, "fund_name": fund_name}
+
+
 def zscore(values: list[float]) -> list[float]:
     n = len(values)
     if n == 0:
@@ -193,21 +283,47 @@ if uploaded_file is not None:
             calculated_funds = []
             not_found = []
             missing_valor = []
+            fallback_used = []
 
             for code in requested_codes:
                 series = get_fund_series(universe, code)
                 metrics = compute_fund_metrics(series)
+                data_source = "TEFAS"
+                extra_info = {}
+
+                if metrics is None and fonoloji_api_key:
+                    fb_series, extra_info = fetch_fonoloji_series(code, fonoloji_api_key)
+                    metrics = compute_fund_metrics(fb_series)
+                    if metrics is not None:
+                        data_source = "Fonoloji (yedek)"
+                        fallback_used.append(code)
+
                 if metrics is None:
                     not_found.append(code)
                     continue
+
                 if valor_by_code.get(code) is None:
                     missing_valor.append(code)
-                calculated_funds.append({"code": code, **metrics})
 
+                calculated_funds.append(
+                    {
+                        "code": code,
+                        "data_source": data_source,
+                        "risk_score": extra_info.get("risk_score", "-"),
+                        **metrics,
+                    }
+                )
+
+            if fallback_used:
+                st.info(
+                    "TEFAS'ta bulunamadığı için Fonoloji API yedeği kullanıldı: "
+                    f"{', '.join(fallback_used)}"
+                )
             if not_found:
+                extra_hint = "" if fonoloji_api_key else " (Fonoloji API anahtarı girilirse otomatik yedek denenir)"
                 st.warning(
-                    "TEFAS'ta bulunamadı veya yeterli fiyat verisi yok (analiz dışı "
-                    f"bırakıldı): {', '.join(not_found)}"
+                    "Hiçbir kaynakta bulunamadı veya yeterli fiyat verisi yok "
+                    f"(analiz dışı bırakıldı){extra_hint}: {', '.join(not_found)}"
                 )
             if missing_valor:
                 st.info(
@@ -263,17 +379,26 @@ if uploaded_file is not None:
 
             calculated_funds.sort(key=lambda x: (x["karar_sira"], -x["kgdm_skor"]))
 
+            # TEFAS ve Fonoloji'den gelen fonların gün sayısı farklı olabilir
+            # (örn. tatil günleri, kısmi veri). Excel satırlarının kaymaması
+            # için hepsini ortak (en kısa) gün sayısına hizalıyoruz.
+            n_days = min(item["n_days"] for item in calculated_funds)
+            for item in calculated_funds:
+                item["dates"] = item["dates"][-n_days:]
+                item["daily_returns"] = item["daily_returns"][-n_days:]
+                item["running_scores"] = item["running_scores"][-n_days:]
+
             # --- Excel sayfası oluşturma ---
             if "KGDM3_Puanlama" in wb.sheetnames:
                 del wb["KGDM3_Puanlama"]
             ws_scores = wb.create_sheet(title="KGDM3_Puanlama")
 
-            n_days = calculated_funds[0]["n_days"]
             day_labels = calculated_funds[0]["dates"]
 
             headers_scores = [
                 "Fon Kodu", "Fon Adı", "Valör", "KGDM-3 Skor (göreli)", "Model Kararı",
                 "Ort. Günlük Getiri (%)", "Volatilite (%)", "Sharpe-benzeri Oran",
+                "Veri Kaynağı", "Resmi Risk Değeri (1-7)",
             ]
             for d in day_labels:
                 headers_scores.append(f"{d} Skor")
@@ -302,6 +427,7 @@ if uploaded_file is not None:
                     item["kgdm_skor"], item["karar"],
                     round(item["mean_return"], 3), round(item["volatility"], 3),
                     round(item["sharpe_like"], 3),
+                    item["data_source"], item["risk_score"],
                 ]
                 row_data += item["running_scores"]
                 row_data += pct_strs
@@ -309,7 +435,8 @@ if uploaded_file is not None:
                 scores_table_data.append(row_data)
 
             decision_col = 5  # 1-indexed: "Model Kararı"
-            return_cols_start = 9 + n_days  # % Getiri sütunlarının başladığı yer
+            n_meta_cols = 10  # Fon Kodu .. Resmi Risk Değeri arasındaki sabit sütun sayısı
+            return_cols_start = n_meta_cols + n_days + 1  # % Getiri sütunlarının başladığı yer
 
             for row in ws_scores.iter_rows(
                 min_row=2, max_row=len(calculated_funds) + 1,
