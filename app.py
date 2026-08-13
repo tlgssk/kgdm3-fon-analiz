@@ -15,13 +15,13 @@ from openpyxl.utils import get_column_letter
 st.set_page_config(page_title="KGDM-3 Fon Analiz Otomasyonu", page_icon="📊", layout="wide")
 
 st.title("📊 KGDM-3 Fon Analiz ve Excel Otomasyonu")
-st.caption("Farklı kaynaklardan şelale (waterfall) mantığıyla veri çekerek fonları analiz eder ve KGDM-3 puanı üretir.")
+st.caption("Veri şelalesi ile fonları analiz eder. Son 10 günün her birisi için ayrı ayrı tam kapsamlı KGDM-3 puanı hesaplar.")
 
 FUND_KINDS = ("YAT", "EMK", "BYF")
 LOOKBACK_CALENDAR_DAYS = 35
 TARGET_TRADING_DAYS = 10
 HTTP_TIMEOUT = 8
-APP_VERSION = "3.0.1"
+APP_VERSION = "4.0.0"
 
 COLOR_NAVY = "1F4E79"
 COLOR_GREEN = "008000"
@@ -107,9 +107,6 @@ def fetch_tefas_universe(start_date: dt.date, end_date: dt.date) -> pd.DataFrame
         
         if "investors" in df.columns: df["investors"] = df["investors"].apply(parse_number)
         else: df["investors"] = 0
-            
-        if "kind" not in df.columns: df["kind"] = ""
-        if "title" not in df.columns: df["title"] = ""
             
         df = df.dropna(subset=["date", "code", "price"])
         df = df[df["price"] > 0]
@@ -233,22 +230,11 @@ def compute_fund_metrics(series: Optional[pd.DataFrame]) -> Optional[dict]:
             
     if not daily_returns: return None
     
-    mean_return = sum(daily_returns) / len(daily_returns)
-    variance = sum((value - mean_return) ** 2 for value in daily_returns) / len(daily_returns)
-    volatility = variance ** 0.5
-    sharpe_like = (mean_return / volatility) if volatility > 1e-12 else 0.0
-    cumulative_return = ((prices[-1] / prices[0] - 1) * 100)
-    
-    running_scores = []
-    for price in prices[1:]:
-        raw_score = 50 + (((price / prices[0] - 1) * 100) * 5)
-        score = int(round(max(0.0, min(100.0, raw_score))))
-        running_scores.append(score)
-        
     return {
-        "dates": dates[1:], "daily_returns": daily_returns, "running_scores": running_scores,
-        "mean_return": mean_return, "volatility": volatility, "sharpe_like": sharpe_like,
-        "cumulative_return": cumulative_return, "n_days": len(daily_returns)
+        "dates": dates[1:], 
+        "prices": prices,
+        "daily_returns": daily_returns,
+        "n_days": len(daily_returns)
     }
 
 def zscore(values: list[float]) -> list[float]:
@@ -262,17 +248,6 @@ def zscore(values: list[float]) -> list[float]:
     
     if std < 1e-12: return [0.0 for _ in values]
     return [(float(value) - mean_value) / std for value in values]
-
-def calculate_kgdm_score(mean_z: float, sharpe_z: float, cumulative_z: float, valor: Optional[int]) -> int:
-    valor_penalty = valor * 0.5 if valor is not None else 0.0
-    raw_score = 50 + 15 * mean_z + 20 * sharpe_z + 15 * cumulative_z - valor_penalty
-    return int(round(max(0.0, min(100.0, raw_score))))
-
-def get_decision(score: int) -> tuple[str, int]:
-    if score >= 60: return ("GÜÇLÜ AL (≥60 Puan)", 1)
-    if score >= 40: return ("ASIL LİSTE (40-59 Puan)", 2)
-    if score >= 25: return ("NÖTR / İZLEME (25-39 Puan)", 3)
-    return ("ACİL SAT (<25 Puan)", 4)
 
 def style_excel_sheet(ws):
     thin_gray = Side(style="thin", color="D9E1F2")
@@ -294,16 +269,10 @@ def auto_fit_columns(ws, min_width: int = 10, max_width: int = 45):
         width = max(min_width, min(max_length + 3, max_width))
         ws.column_dimensions[get_column_letter(column_index)].width = width
 
-def create_excel_output(wb, ws_list, calculated_funds) -> io.BytesIO:
+def create_excel_output(wb, ws_list, calculated_funds, n_days) -> io.BytesIO:
     if "KGDM3_Puanlama" in wb.sheetnames: del wb["KGDM3_Puanlama"]
     ws_scores = wb.create_sheet(title="KGDM3_Puanlama")
-    n_days = min(item["n_days"] for item in calculated_funds)
     
-    for item in calculated_funds:
-        item["dates"] = item["dates"][-n_days:]
-        item["daily_returns"] = item["daily_returns"][-n_days:]
-        item["running_scores"] = item["running_scores"][-n_days:]
-        
     day_labels = calculated_funds[0]["dates"]
     headers = ["Fon Kodu", "Valör (Excel)", "KGDM-3 Skor", "Model Kararı", "Ort. Getiri (%)", "Volatilite (%)", "Sharpe", "Kümülatif Getiri (%)", "Fon Büyüklüğü (AUM ₺)", "Yatırımcı Sayısı", "Fiyat Kaynağı"]
     for day in day_labels: headers.append(f"{day} Skor")
@@ -385,18 +354,12 @@ uploaded_file = st.file_uploader("Excel Dosyanızı Yükleyin (fonlar.xlsx):", t
 
 if uploaded_file is None:
     st.info("Başlamak için Fon_Listesi sayfasını içeren Excel dosyanızı yükleyin.")
-    st.markdown("### Excel formatı\n\n`Fon_Listesi` sayfasında:\n\n| A sütunu | D sütunu |\n|---|---|\n| Fon Kodu | Valör |\n\nÖrnek:\n\n```text\nFon Kodu    ...    ...    Valör\nAFT                      1\nMAC                      2\nTCD                      3\n```")
     st.stop()
 
-try:
-    wb = openpyxl.load_workbook(uploaded_file)
-except Exception as exc:
-    st.error(f"Excel dosyası okunamadı: {exc}")
-    st.stop()
+try: wb = openpyxl.load_workbook(uploaded_file)
+except Exception as exc: st.error(f"Excel dosyası okunamadı: {exc}"); st.stop()
 
-if "Fon_Listesi" not in wb.sheetnames:
-    st.error("Yüklenen dosyada 'Fon_Listesi' sayfası bulunamadı!")
-    st.stop()
+if "Fon_Listesi" not in wb.sheetnames: st.error("Yüklenen dosyada 'Fon_Listesi' sayfası bulunamadı!"); st.stop()
 
 ws_list = wb["Fon_Listesi"]
 requested_codes = []
@@ -417,9 +380,7 @@ for row in ws_list.iter_rows(min_row=2, values_only=False):
     excel_valor_dict[code] = valor
 
 requested_codes = list(dict.fromkeys(requested_codes))
-if not requested_codes:
-    st.warning("Fon_Listesi sayfasında fon kodu bulunamadı.")
-    st.stop()
+if not requested_codes: st.warning("Fon_Listesi sayfasında fon kodu bulunamadı."); st.stop()
 
 st.subheader("📋 Analiz Özeti")
 summary_col1, summary_col2, summary_col3 = st.columns(3)
@@ -433,9 +394,8 @@ start_date = today - dt.timedelta(days=LOOKBACK_CALENDAR_DAYS)
 with st.spinner("🔄 TEFAS verileri çekiliyor..."):
     universe = fetch_tefas_universe(start_date, today)
 
-# HATA BURADAYDI! `st.stop()` kaldırıldı ve sadece bilgi verildi.
 if universe.empty:
-    st.warning("⚠️ Ana veri kaynağı olan TEFAS'a (pytefas) erişilemedi veya kütüphane kurulu değil. Yedek kaynaklar (İş Yatırım, Fintables) ile analiz devam ediyor...")
+    st.warning("⚠️ Ana veri kaynağı olan TEFAS'a (pytefas) erişilemedi. Yedek kaynaklar (İş Yatırım, Fintables) ile analiz devam ediyor...")
 
 available_codes = set(universe["code"].astype(str).str.upper().unique()) if not universe.empty else set()
 found_in_tefas = [code for code in requested_codes if code in available_codes]
@@ -445,9 +405,6 @@ col1, col2, col3 = st.columns(3)
 with col1: st.metric("TEFAS'ta Bulunan", len(found_in_tefas))
 with col2: st.metric("Yedek Kaynağa Kalan", len(missing_from_tefas))
 with col3: st.metric("TEFAS Kayıt Sayısı", len(universe))
-
-if missing_from_tefas:
-    with st.expander("⚠️ TEFAS'ta bulunamayan fonlar (Yedek aranıyor)"): st.write(", ".join(missing_from_tefas))
 
 calculated_funds = []
 source_errors = []
@@ -485,36 +442,58 @@ for index, code in enumerate(requested_codes, start=1):
 progress.empty()
 
 if not calculated_funds:
-    st.error("Hiçbir fon hesaplanamadı.\n\nMuhtemel nedenler:\n- Fon kodları hatalı.\n- TEFAS ve Yedek Kaynaklar (İş Yatırım, Fintables) veri döndürmedi.\n- Fon için yeterli işlem günü bulunamadı.")
-    if source_errors:
-        st.subheader("Hata Detayları")
-        st.dataframe(pd.DataFrame(source_errors), use_container_width=True)
+    st.error("Hiçbir fon hesaplanamadı.")
+    if source_errors: st.dataframe(pd.DataFrame(source_errors), use_container_width=True)
     st.stop()
 
-mean_returns = [item["mean_return"] for item in calculated_funds]
-sharpes = [item["sharpe_like"] for item in calculated_funds]
-cumulative_returns = [item["cumulative_return"] for item in calculated_funds]
-multi_fund = len(calculated_funds) > 1
-
-if multi_fund:
-    z_mean = zscore(mean_returns)
-    z_sharpe = zscore(sharpes)
-    z_cumulative = zscore(cumulative_returns)
-else:
-    z_mean, z_sharpe, z_cumulative = [0.0], [0.0], [0.0]
-
-for index, item in enumerate(calculated_funds):
-    score = calculate_kgdm_score(mean_z=z_mean[index], sharpe_z=z_sharpe[index], cumulative_z=z_cumulative[index], valor=item["valor"])
-    decision, decision_order = get_decision(score)
-    item.update({"kgdm_skor": score, "karar": decision, "karar_sira": decision_order, "z_mean": z_mean[index], "z_sharpe": z_sharpe[index], "z_cumulative": z_cumulative[index]})
-
-calculated_funds.sort(key=lambda item: (item["karar_sira"], -item["kgdm_skor"], -item["cumulative_return"]))
+# Ortak gün sayısına hizalama
 n_days = min(item["n_days"] for item in calculated_funds)
-
 for item in calculated_funds:
     item["dates"] = item["dates"][-n_days:]
     item["daily_returns"] = item["daily_returns"][-n_days:]
-    item["running_scores"] = item["running_scores"][-n_days:]
+    item["prices"] = item["prices"][-(n_days+1):]
+    item["running_scores"] = []
+
+# HER BİR GEÇMİŞ GÜN İÇİN Z-SKOR İLE GERÇEK KGDM-3 HESAPLAMASI
+for d in range(1, n_days + 1):
+    day_means, day_sharpes, day_cums = [], [], []
+    for item in calculated_funds:
+        slice_ret = item["daily_returns"][:d]
+        m_ret = sum(slice_ret) / len(slice_ret)
+        var = sum((r - m_ret) ** 2 for r in slice_ret) / len(slice_ret)
+        vol = var ** 0.5
+        shp = (m_ret / vol) if vol > 1e-12 else 0.0
+        cum = (item["prices"][d] / item["prices"][0] - 1) * 100
+        
+        day_means.append(m_ret)
+        day_sharpes.append(shp)
+        day_cums.append(cum)
+        
+        if d == n_days:
+            item["mean_return"] = m_ret
+            item["volatility"] = vol
+            item["sharpe_like"] = shp
+            item["cumulative_return"] = cum
+            
+    z_m = zscore(day_means) if len(calculated_funds) > 1 else [0.0 for _ in calculated_funds]
+    z_s = zscore(day_sharpes) if len(calculated_funds) > 1 else [0.0 for _ in calculated_funds]
+    z_c = zscore(day_cums) if len(calculated_funds) > 1 else [0.0 for _ in calculated_funds]
+    
+    for i, item in enumerate(calculated_funds):
+        val = item["valor"]
+        v_pen = (val * 0.5) if val is not None else 0.0
+        raw_score = 50 + 15 * z_m[i] + 20 * z_s[i] + 15 * z_c[i] - v_pen
+        score = int(round(max(0.0, min(100.0, raw_score))))
+        item["running_scores"].append(score)
+        
+        if d == n_days:
+            item["kgdm_skor"] = score
+            if score >= 60: item["karar"] = "GÜÇLÜ AL (≥60 Puan)"; item["karar_sira"] = 1
+            elif score >= 40: item["karar"] = "ASIL LİSTE (40-59 Puan)"; item["karar_sira"] = 2
+            elif score >= 25: item["karar"] = "NÖTR / İZLEME (25-39 Puan)"; item["karar_sira"] = 3
+            else: item["karar"] = "ACİL SAT (<25 Puan)"; item["karar_sira"] = 4
+
+calculated_funds.sort(key=lambda item: (item["karar_sira"], -item["kgdm_skor"], -item["cumulative_return"]))
 
 display_rows = []
 for item in calculated_funds:
@@ -563,9 +542,8 @@ if source_errors:
     with st.expander(f"⚠️ Veri alınamayan fonlar ({len(source_errors)})"):
         st.dataframe(pd.DataFrame(source_errors), use_container_width=True, hide_index=True)
 
-output = create_excel_output(wb=wb, ws_list=ws_list, calculated_funds=calculated_funds)
-st.success(f"✅ Analiz tamamlandı. {len(calculated_funds)} fon hesaplandı.")
+output = create_excel_output(wb=wb, ws_list=ws_list, calculated_funds=calculated_funds, n_days=n_days)
+st.success(f"✅ Analiz tamamlandı. {len(calculated_funds)} fon, geçmiş her bir iş günü (10 gün) için kendi içinde Z-Skor ile yarıştırılarak hesaplandı.")
 
 st.download_button(label="📥 Güncellenmiş Excel'i İndir", data=output, file_name="fonlar_guncel.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 st.caption(f"KGDM-3 Fon Analiz Otomasyonu v{APP_VERSION} | Analiz tarihi: {today.strftime('%d.%m.%Y')}")
-st.caption("⚠️ KGDM-3 skoru teknik bir model puanıdır; yatırım tavsiyesi değildir.")
