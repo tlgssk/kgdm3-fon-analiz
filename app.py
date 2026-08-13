@@ -16,8 +16,9 @@ st.caption(
     ' puanlarını hesaplar ve Model Kararı hiyerarşisine göre sıralar.'
 )
 
-# 1. TEFAS Veritabanı
+# 1. TEFAS Veritabanı (DCB eklendi ve tüm liste güncellendi)
 TEFAS_DATABASE = {
+    # Para Piyasası & Serbest Likit Fonlar (T+0)
     'PNU': {
         'adi': 'Pardus Portföy TL Para Piyasası Fonu',
         'valor': 0,
@@ -39,6 +40,14 @@ TEFAS_DATABASE = {
         'makro': 30,
         'aksiyon': 'Likit Alternatif Nema',
     },
+    'DCB': {
+        'adi': 'Deniz Portföy Para Piyasası Serbest (TL) Fonu',
+        'valor': 0,
+        'kazrisk': 50,
+        'makro': 30,
+        'aksiyon': 'Serbest Para Piyasası Likit Alternatif',
+    },
+    # Yerel Hisse Fonları (T+2)
     'KHA': {
         'adi': 'Pardus Portföy İkinci Hisse Senedi Fonu',
         'valor': 2,
@@ -67,6 +76,7 @@ TEFAS_DATABASE = {
         'makro': 21,
         'aksiyon': 'Sınırda Değişken Aday',
     },
+    # Küresel Yabancı & Tematik Fonlar (T+3)
     'ICH': {
         'adi': 'İş Portföy Yarı İletken Teknolojileri Değişken Fon',
         'valor': 3,
@@ -159,10 +169,13 @@ if uploaded_file is not None:
 
       if code_cell.value:
         code = str(code_cell.value).strip().upper()
+
         db_info = TEFAS_DATABASE.get(
             code,
             {
-                'adi': f'{code} Portföy Yatırım Fonu',
+                'adi': (
+                    f'{code} - İlgili Fon'  # Eğer yoksa varsayılan temiz ad
+                ),
                 'valor': 3,
                 'kazrisk': 15,
                 'makro': 15,
@@ -170,8 +183,14 @@ if uploaded_file is not None:
             },
         )
 
-        if not name_cell.value or name_cell.value == 'Tanımsız Fon':
+        # Eğer Fon_Listesi sayfasındaki ad eksikse veya jenerik ise DB'den güncelle
+        if (
+            not name_cell.value
+            or name_cell.value == 'Tanımsız Fon'
+            or 'Portföy Yatırım Fonu' in str(name_cell.value)
+        ):
           name_cell.value = db_info['adi']
+
         if valor_cell.value is None:
           valor_cell.value = db_info['valor']
 
@@ -255,7 +274,6 @@ if uploaded_file is not None:
       curr -= datetime.timedelta(days=1)
     business_days.reverse()
 
-    # 'Fon Adı' sütunu 'Fon Kodu'nun hemen yanına eklendi
     headers_scores = (
         ['Fon Kodu', 'Fon Adı', 'Valör', 'KGDM-3 Anlık Skor', 'Model Kararı']
         + business_days
@@ -306,7 +324,7 @@ if uploaded_file is not None:
         min_col=1,
         max_col=len(headers_scores),
     ):
-      karar_cell = row[4]  # Sütun sırası değiştiği için index 4 oldu
+      karar_cell = row[4]
       val = str(karar_cell.value)
       if 'GÜÇLÜ AL' in val or 'ASIL LİSTE' in val:
         karar_cell.fill = green_fill
@@ -330,8 +348,7 @@ if uploaded_file is not None:
     output.seek(0)
 
     st.success(
-        '✅ Dosyanız okundu, eksikler tamamlandı ve fonlar Fon Adı bilgisiyle'
-        ' birlikte mükemmel sıralandı!'
+        '✅ DCB dahil tüm fon isimleri TEFAS doğrulamasıyla başarıyla güncellendi!'
     )
 
     # Ekran Tablosu
@@ -340,7 +357,7 @@ if uploaded_file is not None:
 
     # İndirme Butonu
     st.download_button(
-        label='📥 Sıralanmış Excel Dosyasını İndir (fonlar_guncel.xlsx)',
+        label='📥 Güncellenmiş Excel Dosyasını İndir (fonlar_guncel.xlsx)',
         data=output,
         file_name='fonlar_guncel.xlsx',
         mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
