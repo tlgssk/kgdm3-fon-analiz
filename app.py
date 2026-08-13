@@ -1113,24 +1113,59 @@ uploaded_file = st.file_uploader(
 )
 
 if uploaded_file is None:
-    st.info(
-        "Başlamak için Fon_Listesi sayfasını içeren "
-        "Excel dosyanızı yükleyin."
-    )
+    st.info("Başlamak için Fon_Listesi sayfasını içeren Excel dosyanızı yükleyin.")
     st.markdown(
-        """
-### Excel formatı
+        "### Excel formatı\n\n"
+        "`Fon_Listesi` sayfasında:\n\n"
+        "| A sütunu | D sütunu |\n"
+        "|---|---|\n"
+        "| Fon Kodu | Valör |\n\n"
+        "Örnek:\n\n"
+        "```text\n"
+        "Fon Kodu    ...    ...    Valör\n"
+        "AFT                      1\n"
+        "MAC                      2\n"
+        "TCD                      3\n"
+        "```"
+    )
+    st.stop()
 
-`Fon_Listesi` sayfasında:
 
-| A sütunu | D sütunu |
-|---|---|
-| Fon Kodu | Valör |
+try:
+    wb = openpyxl.load_workbook(uploaded_file)
+except Exception as exc:
+    st.error(f"Excel dosyası okunamadı: {exc}")
+    st.stop()
 
-Örnek:
+if "Fon_Listesi" not in wb.sheetnames:
+    st.error("Yüklenen dosyada 'Fon_Listesi' sayfası bulunamadı!")
+    st.stop()
 
-```text
-Fon Kodu    ...    ...    Valör
-AFT                      1
-MAC                      2
-TCD                      3
+ws_list = wb["Fon_Listesi"]
+
+requested_codes = []
+excel_valor_dict = {}
+
+for row in ws_list.iter_rows(min_row=2, values_only=False):
+    if not row:
+        continue
+
+    code_cell = row[0]
+    valor_cell = row[3] if len(row) > 3 else None
+
+    code = normalize_fund_code(code_cell.value)
+
+    if not code:
+        continue
+
+    requested_codes.append(code)
+
+    valor = None
+    if (
+        valor_cell is not None
+        and valor_cell.value is not None
+        and str(valor_cell.value).strip()
+    ):
+        parsed_valor = parse_number(valor_cell.value)
+        if parsed_valor is not None:
+            valor = int(round(
