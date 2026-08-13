@@ -132,7 +132,7 @@ TEFAS_DATABASE = {
     },
 }
 
-uploaded_file = st.file_input(
+uploaded_file = st.file_uploader(
     'Excel Dosyanızı Yükleyin (fonlar.xlsx):', type=['xlsx']
 )
 
