@@ -15,8 +15,7 @@ st.set_page_config(
 st.title('📊 KGDM-3 Fon Analiz ve Excel Otomasyonu')
 st.caption(
     'Fon_Listesi sayfasındaki fon kodlarının resmi TEFAS adlarını tamamlar, KGDM-3'
-    ' puanlarını ve her günün bir önceki günün fiyatına göre % Fiyat Getirisini'
-    ' hesaplar.'
+    ' puanlarını, kararlarını ve % Fiyat Getirilerini renklendirerek hesaplar.'
 )
 
 # 1. KAPSAMLI VE %100 DOĞRULANMIŞ TEFAS RESMİ VERİTABANI
@@ -369,7 +368,7 @@ TEFAS_DATABASE = {
 }
 
 
-# Dynamic Web Scraper
+# Dynamic Scraper
 def fetch_official_tefas_name(fund_code):
   fund_code = fund_code.upper().strip()
 
@@ -458,7 +457,7 @@ if uploaded_file is not None:
             'daily_returns': db_info.get('daily_returns', [0.10] * 10),
         })
 
-    # 2. KGDM-3 Puan ve Bir Önceki Günün Fiyatına Göre % Getiri Hesabı
+    # 2. KGDM-3 Puan ve Fiyat % Getirisi Hesaplamaları
     calculated_funds = []
     for item in user_funds:
       code = item['kod']
@@ -497,7 +496,7 @@ if uploaded_file is not None:
         daily_scores.append(round(min(100, max(0, val)), 1))
       daily_scores[-1] = kgdm_skor
 
-      # Bir önceki günün fiyatı ile o gün oluşan fiyat arasındaki % Değişim Oranları (Getiri)
+      # % Fiyat Getirileri
       price_pct_changes = []
       for ret in raw_returns:
         if ret > 0:
@@ -580,16 +579,21 @@ if uploaded_file is not None:
       ws_scores.append(row_data)
       scores_table_data.append(row_data)
 
-    # 5. Renklendirme ve Formatlama
+    # 5. Özel Zemin Renklendirmeleri (İstediğiniz Koşullarla)
     green_fill = PatternFill(
         start_color='E2EFDA', end_color='E2EFDA', fill_type='solid'
     )
-    yellow_fill = PatternFill(
-        start_color='FFF2CC', end_color='FFF2CC', fill_type='solid'
-    )
+    green_font = Font(name='Calibri', bold=True, color='375623')
+
     red_fill = PatternFill(
         start_color='FCE4D6', end_color='FCE4D6', fill_type='solid'
     )
+    red_font = Font(name='Calibri', bold=True, color='C65911')
+
+    yellow_fill = PatternFill(
+        start_color='FFF2CC', end_color='FFF2CC', fill_type='solid'
+    )
+    yellow_font = Font(name='Calibri', color='7F6000')
 
     for row in ws_scores.iter_rows(
         min_row=2,
@@ -597,17 +601,32 @@ if uploaded_file is not None:
         min_col=1,
         max_col=len(headers_scores),
     ):
+      # Model Kararı Renklendirmesi (GÜÇLÜ AL -> Yeşil, ACİL SAT -> Kırmızı)
       karar_cell = row[4]
       val = str(karar_cell.value)
-      if 'GÜÇLÜ AL' in val or 'ASIL LİSTE' in val:
+      if 'GÜÇLÜ AL' in val:
         karar_cell.fill = green_fill
-        karar_cell.font = Font(name='Calibri', bold=True, color='375623')
+        karar_cell.font = green_font
+      elif 'ASIL LİSTE' in val:
+        karar_cell.fill = green_fill
+        karar_cell.font = green_font
       elif 'NÖTR' in val:
         karar_cell.fill = yellow_fill
-        karar_cell.font = Font(name='Calibri', color='7F6000')
+        karar_cell.font = yellow_font
       elif 'ACİL SAT' in val:
         karar_cell.fill = red_fill
-        karar_cell.font = Font(name='Calibri', bold=True, color='C65911')
+        karar_cell.font = red_font
+
+      # % Getiri Sütunlarının Renklendirmesi (+ -> Yeşil, - -> Kırmızı)
+      for col_idx in range(6, len(headers_scores), 2):
+        ret_cell = row[col_idx]
+        ret_val = str(ret_cell.value)
+        if ret_val.startswith('+'):
+          ret_cell.fill = green_fill
+          ret_cell.font = green_font
+        elif ret_val.startswith('-'):
+          ret_cell.fill = red_fill
+          ret_cell.font = red_font
 
     for sheet in [ws_list, ws_scores]:
       for col in sheet.columns:
@@ -620,15 +639,15 @@ if uploaded_file is not None:
     output.seek(0)
 
     st.success(
-        '✅ Her bir gün için bir önceki günün fiyatına göre % Fiyat Getirisi'
-        ' sütunları başarıyla oluşturuldu!'
+        '✅ GÜÇLÜ AL (Yeşil), ACİL SAT (Kırmızı), Pozitif % (Yeşil) ve Negatif'
+        ' % (Kırmızı) zemin renklendirmeleri başarıyla uygulandı!'
     )
 
     df_display = pd.DataFrame(scores_table_data, columns=headers_scores)
     st.dataframe(df_display, use_container_width=True)
 
     st.download_button(
-        label='📥 Günlük Fiyat Getirili Excel İndir (fonlar_guncel.xlsx)',
+        label='📥 Renklendirilmiş Özel Excel İndir (fonlar_guncel.xlsx)',
         data=output,
         file_name='fonlar_guncel.xlsx',
         mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
