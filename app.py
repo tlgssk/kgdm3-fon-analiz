@@ -14,8 +14,8 @@ st.set_page_config(
 
 st.title('📊 KGDM-3 Fon Analiz ve Excel Otomasyonu')
 st.caption(
-    'Fon_Listesi sayfasındaki fon kodlarının resmi TEFAS adlarını otomatik'
-    ' tamamlar ve KGDM-3 puanlamasını hesaplar.'
+    'Fon_Listesi sayfasındaki fon kodlarının resmi TEFAS adlarını tamamlar, KGDM-3'
+    ' puanlarını ve Günlük % Değişim (Kazanç/Kayıp) oranlarını hesaplar.'
 )
 
 # 1. KAPSAMLI VE %100 DOĞRULANMIŞ TEFAS RESMİ VERİTABANI
@@ -152,15 +152,13 @@ TEFAS_DATABASE = {
 }
 
 
-# Akıllı Veri Çekici (Canlı Web Sorgusu Fallback)
+# Dynamic Web Scraper
 def fetch_official_tefas_name(fund_code):
   fund_code = fund_code.upper().strip()
 
-  # 1. Öncelik: Yerel Doğrulanmış Sözlük
   if fund_code in TEFAS_DATABASE:
     return TEFAS_DATABASE[fund_code]['adi']
 
-  # 2. Öncelik: Fintables / Yatırım Direkt Web Sorgusu
   try:
     url = f'https://fintables.com/fonlar/{fund_code}'
     req = urllib.request.Request(
@@ -175,7 +173,7 @@ def fetch_official_tefas_name(fund_code):
       html = response.read().decode('utf-8')
       match = re.search(r'<title>([^-]+)-', html)
       if match:
-        return match.group(1).replace('DBK Fon Analiz', '').strip()
+        return match.group(1).replace('Fon Analiz', '').strip()
   except Exception:
     pass
 
@@ -209,8 +207,6 @@ if uploaded_file is not None:
 
       if code_cell.value:
         code = str(code_cell.value).strip().upper()
-
-        # Resmi TEFAS Karşılığı Adı Getir
         official_name = fetch_official_tefas_name(code)
 
         db_info = TEFAS_DATABASE.get(
@@ -224,7 +220,6 @@ if uploaded_file is not None:
             },
         )
 
-        # Excel'deki adı TEFAS RESMİ ADI ile güncelle!
         name_cell.value = official_name
 
         if valor_cell.value is None:
@@ -244,7 +239,7 @@ if uploaded_file is not None:
             'aksiyon': db_info.get('aksiyon', 'Takip Modunda'),
         })
 
-    # 2. KGDM-3 Puan Hesaplamaları
+    # 2. KGDM-3 Puan ve Günlük % Değişim Oranları Hesaplamaları
     calculated_funds = []
     for item in user_funds:
       code = item['kod']
@@ -281,11 +276,23 @@ if uploaded_file is not None:
         daily_trend.append(round(min(100, max(0, val)), 1))
       daily_trend[-1] = kgdm_skor
 
+      # Günlük % Değişim Oranının (Son gün ile bir önceki gün arasındaki % fark) Hesaplanması
+      prev_day_skor = daily_trend[-2] if len(daily_trend) >= 2 else kgdm_skor
+      if prev_day_skor != 0:
+        pct_change = round(
+            ((kgdm_skor - prev_day_skor) / abs(prev_day_skor)) * 100, 2
+        )
+      else:
+        pct_change = 0.0
+
+      pct_str = f'+{pct_change}%' if pct_change > 0 else f'{pct_change}%'
+
       calculated_funds.append({
           'code': code,
           'name': name,
           'valor': valor,
           'kgdm_skor': kgdm_skor,
+          'pct_str': pct_str,
           'karar': karar,
           'karar_sira': karar_sira,
           'daily_trend': daily_trend,
@@ -311,7 +318,14 @@ if uploaded_file is not None:
     business_days.reverse()
 
     headers_scores = (
-        ['Fon Kodu', 'Fon Adı', 'Valör', 'KGDM-3 Anlık Skor', 'Model Kararı']
+        [
+            'Fon Kodu',
+            'Fon Adı',
+            'Valör',
+            'KGDM-3 Anlık Skor',
+            'Son Gün % Değişim',
+            'Model Kararı',
+        ]
         + business_days
         + ['Açıklama / Aksiyon']
     )
@@ -335,6 +349,7 @@ if uploaded_file is not None:
               item['name'],
               item['valor'],
               item['kgdm_skor'],
+              item['pct_str'],
               item['karar'],
           ]
           + item['daily_trend']
@@ -360,7 +375,7 @@ if uploaded_file is not None:
         min_col=1,
         max_col=len(headers_scores),
     ):
-      karar_cell = row[4]
+      karar_cell = row[5]  # Sütun eklendiği için index 5 oldu
       val = str(karar_cell.value)
       if 'GÜÇLÜ AL' in val or 'ASIL LİSTE' in val:
         karar_cell.fill = green_fill
@@ -384,8 +399,8 @@ if uploaded_file is not None:
     output.seek(0)
 
     st.success(
-        '✅ DBK dahil tüm fon isimleri resmi TEFAS unvanlarıyla %100 doğrulanarak'
-        ' güncellendi!'
+        '✅ KGDM-3 skorları, % Değişim oranları ve resmi TEFAS isimleri'
+        ' başarıyla güncellendi!'
     )
 
     # Ekran Tablosu
