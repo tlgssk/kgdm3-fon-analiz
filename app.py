@@ -12,11 +12,11 @@ st.set_page_config(
 
 st.title('📊 KGDM-3 Fon Analiz ve Excel Otomasyonu')
 st.caption(
-    'Fon_Listesi sayfasındaki eksik bilgileri TEFAS veritabanından tamamlar ve'
-    ' KGDM-3 (3 Katmanlı Dinamik Model) ile puanlama yapar.'
+    'Fon_Listesi sayfasındaki eksik bilgileri TEFAS veritabanından tamamlar, KGDM-3'
+    ' puanlarını hesaplar ve Model Kararı hiyerarşisine göre sıralar.'
 )
 
-# TEFAS Veritabanı
+# 1. TEFAS Veritabanı
 TEFAS_DATABASE = {
     'PNU': {
         'adi': 'Pardus Portföy TL Para Piyasası Fonu',
@@ -189,7 +189,58 @@ if uploaded_file is not None:
             'aksiyon': db_info.get('aksiyon', 'Takip Modunda'),
         })
 
-    # 2. KGDM3_Puanlama Sayfası Oluşturma
+    # 2. KGDM-3 Puan Hesaplamaları
+    calculated_funds = []
+    for item in user_funds:
+      code = item['kod']
+      valor = item['valor']
+      kazrisk = item['kazrisk']
+      makro = item['makro']
+      aksiyon = item['aksiyon']
+
+      valor_ceza = valor * 1.5
+      kgdm_skor = round(kazrisk + makro - valor_ceza, 1)
+
+      if kgdm_skor >= 60:
+        karar = 'GÜÇLÜ AL'
+        karar_sira = 1
+      elif kgdm_skor >= 40:
+        karar = 'ASIL LİSTE'
+        karar_sira = 2
+      elif kgdm_skor >= 25:
+        karar = 'NÖTR / İZLEME'
+        karar_sira = 3
+      else:
+        karar = 'ACİL SAT'
+        karar_sira = 4
+
+      daily_trend = []
+      base_start = kgdm_skor - 12 if 'ACİL SAT' not in karar else kgdm_skor + 10
+      for i in range(10):
+        val = (
+            base_start - (i * 1.1)
+            if 'ACİL SAT' in karar
+            else base_start + (i * 1.2)
+        )
+        daily_trend.append(round(min(100, max(0, val)), 1))
+      daily_trend[-1] = kgdm_skor
+
+      calculated_funds.append({
+          'code': code,
+          'valor': valor,
+          'kgdm_skor': kgdm_skor,
+          'karar': karar,
+          'karar_sira': karar_sira,
+          'daily_trend': daily_trend,
+          'aksiyon': aksiyon,
+      })
+
+    # 3. İstenen Çift Aşamalı Sıralama Mantığı:
+    # 1. Öncelik: Model Kararı Hiyerarşisi (1: GÜÇLÜ AL, 2: ASIL LİSTE, 3: NÖTR, 4: ACİL SAT)
+    # 2. Öncelik: KGDM-3 Anlık Skoruna Göre Büyükten Küçüğe (-kgdm_skor)
+    calculated_funds.sort(key=lambda x: (x['karar_sira'], -x['kgdm_skor']))
+
+    # 4. KGDM3_Puanlama Sayfasını Hazırlama & Yazma
     if 'KGDM3_Puanlama' in wb.sheetnames:
       del wb['KGDM3_Puanlama']
 
@@ -221,43 +272,17 @@ if uploaded_file is not None:
       cell.font = header_font
       cell.alignment = Alignment(horizontal='center', vertical='center')
 
-    # 3. Puanlama
     scores_table_data = []
-    for item in user_funds:
-      code = item['kod']
-      valor = item['valor']
-      kazrisk = item['kazrisk']
-      makro = item['makro']
-      aksiyon = item['aksiyon']
-
-      valor_ceza = valor * 1.5
-      kgdm_skor = round(kazrisk + makro - valor_ceza, 1)
-
-      if kgdm_skor >= 60:
-        karar = 'GÜÇLÜ AL'
-      elif kgdm_skor >= 40:
-        karar = 'ASIL LİSTE'
-      elif kgdm_skor >= 25:
-        karar = 'NÖTR / İZLEME'
-      else:
-        karar = 'ACİL SAT'
-
-      daily_trend = []
-      base_start = kgdm_skor - 12 if 'ACİL SAT' not in karar else kgdm_skor + 10
-      for i in range(10):
-        val = (
-            base_start - (i * 1.1)
-            if 'ACİL SAT' in karar
-            else base_start + (i * 1.2)
-        )
-        daily_trend.append(round(min(100, max(0, val)), 1))
-      daily_trend[-1] = kgdm_skor
-
-      row_data = [code, valor, kgdm_skor, karar] + daily_trend + [aksiyon]
+    for item in calculated_funds:
+      row_data = (
+          [item['code'], item['valor'], item['kgdm_skor'], item['karar']]
+          + item['daily_trend']
+          + [item['aksiyon']]
+      )
       ws_scores.append(row_data)
       scores_table_data.append(row_data)
 
-    # Renklendirme
+    # 5. Renklendirme ve Formatlama
     green_fill = PatternFill(
         start_color='E2EFDA', end_color='E2EFDA', fill_type='solid'
     )
@@ -270,7 +295,7 @@ if uploaded_file is not None:
 
     for row in ws_scores.iter_rows(
         min_row=2,
-        max_row=len(user_funds) + 1,
+        max_row=len(calculated_funds) + 1,
         min_col=1,
         max_col=len(headers_scores),
     ):
@@ -298,8 +323,8 @@ if uploaded_file is not None:
     output.seek(0)
 
     st.success(
-        '✅ Dosyanız başarıyla okundu, eksik fon bilgileri tamamlandı ve KGDM-3'
-        ' puanları hesaplandı!'
+        '✅ Dosyanız okundu, eksikler tamamlandı ve fonlar Model Kararı ile'
+        ' Anlık Skora göre mükemmel sıralandı!'
     )
 
     # Ekran Tablosu
@@ -308,7 +333,7 @@ if uploaded_file is not None:
 
     # İndirme Butonu
     st.download_button(
-        label='📥 Güncellenmiş Excel Dosyasını İndir (fonlar_guncel.xlsx)',
+        label='📥 Sıralanmış Excel Dosyasını İndir (fonlar_guncel.xlsx)',
         data=output,
         file_name='fonlar_guncel.xlsx',
         mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
