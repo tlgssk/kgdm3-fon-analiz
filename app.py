@@ -17,9 +17,9 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # ============================================================
 # SAYFA AYARLARI & SABİTLER
 # ============================================================
-st.set_page_config(page_title="Multi-Vade Fon Analizi V15", page_icon="📈", layout="wide")
-st.title("📈 Multi-Vade Fon Analizi V15")
-st.caption("2026 Yeni Nesil TEFAS API Motoru + Gelişmiş Z-Skor + Tanh Benchmark")
+st.set_page_config(page_title="Multi-Vade Fon Analizi V16", page_icon="📈", layout="wide")
+st.title("📈 Multi-Vade Fon Analizi V16")
+st.caption("Saf TEFAS API Motoru (Sıfır Dış Bağımlılık) + Gelişmiş Z-Skor + Tanh Benchmark")
 
 LOOKBACK_CALENDAR_DAYS = 400
 HTTP_TIMEOUT = 15
@@ -78,55 +78,94 @@ def infer_category(title: str) -> str:
     return "Diğer"
 
 # ============================================================
-# 2026 YENİ NESİL TEFAS API MOTORU
+# SAF TEFAS VE İŞ YATIRIM API MOTORU (V16)
 # ============================================================
 @st.cache_data(show_spinner=False, ttl=60 * 30)
-def fetch_fund_data_via_new_api(code: str, start_date: dt.date, end_date: dt.date) -> Tuple[Optional[pd.DataFrame], dict, str]:
-    try:
-        from tefas import Crawler
-        tefas = Crawler()
-        
-        # Yeni API üzerinden ilgili fonun geçmiş verisini çekiyoruz
-        df = tefas.fetch(start=start_date, end=end_date, name=code.upper())
-        if df is None or df.empty:
-            return None, {}, "Yeni TEFAS API veri döndüremedi."
-            
-        df = df.copy()
-        # Sütun eşleştirmeleri
-        if 'date' in df.columns:
-            df['date'] = pd.to_datetime(df['date'], errors='coerce')
-        elif 'TARIH' in df.columns:
-            df['date'] = pd.to_datetime(df['TARIH'], errors='coerce')
-            
-        if 'price' in df.columns:
-            df['price'] = df['price'].apply(parse_number)
-        elif 'FIYAT' in df.columns:
-            df['price'] = df['price'].apply(parse_number)
-            
-        df = df.dropna(subset=['date', 'price'])
-        df = df[df['price'] > 0]
-        
-        if len(df) < 2:
-            return None, {}, "Yetersiz fiyat serisi."
-            
-        df_sorted = df.sort_values("date").drop_duplicates(subset=["date"], keep="last").tail(MAX_DAYS + 1).reset_index(drop=True)
-        
-        # Meta veriler (AUM, yatırımcı vb.) güncel satırdan alınır
-        latest = df.iloc[-1]
-        title = str(latest.get("fund_name", latest.get("title", "")) or "")
-        aum = safe_float(latest.get("portfolio_size", latest.get("aum", 0.0)))
-        investors = safe_float(latest.get("investor_count", latest.get("investors", 0.0)))
-        
-        meta = {
-            "title": title,
-            "category": infer_category(title),
-            "aum": aum,
-            "investors": investors
+def fetch_fund_data_safely(code: str, start_date: dt.date, end_date: dt.date) -> Tuple[Optional[pd.DataFrame], dict, str]:
+    meta = {"aum": 0.0, "investors": 0.0, "title": "", "category": ""}
+    
+    # 1. YÖNTEM: Doğrudan TEFAS Grafik / Geçmiş Veri API Uç Noktası
+    url_tefas = "https://www.tefas.gov.tr/api/DB/BindHistoryInfo"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "X-Requested-With": "XMLHttpRequest",
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "Referer": "https://www.tefas.gov.tr/FonAnaliz.aspx"
+    }
+    
+    for fontip in ["", "YAT", "EMK", "BYF"]:
+        data = {
+            "fontip": fontip, "sfontur": "", "fonkod": code.upper(), "fongrup": "",
+            "baslangic": start_date.strftime("%d.%m.%Y"), "bitis": end_date.strftime("%d.%m.%Y")
         }
+        try:
+            res = requests.post(url_tefas, data=data, headers=headers, verify=False, timeout=HTTP_TIMEOUT)
+            if res.status_code == 200:
+                json_data = res.json()
+                data_list = json_data.get("data", [])
+                if data_list:
+                    rows = []
+                    for item in data_list:
+                        t = item.get("TARIH")
+                        p = item.get("FIYAT")
+                        if t and p:
+                            rows.append({
+                                "date": pd.Timestamp(dt.datetime.fromtimestamp(t / 1000.0).date()),
+                                "price": float(p)
+                            })
+                    if rows:
+                        df = pd.DataFrame(rows).dropna()
+                        df = df[df["price"] > 0]
+                        if len(df) >= 2:
+                            df_sorted = df.sort_values("date").drop_duplicates(subset=["date"], keep="last").tail(MAX_DAYS + 1).reset_index(drop=True)
+                            
+                            # Meta Bilgiler (Fon Adı, AUM, Yatırımcı)
+                            meta_url = f"https://www.tefas.gov.tr/FonAnaliz.aspx?FonKod={code.upper()}"
+                            m_res = requests.get(meta_url, headers={"User-Agent": "Mozilla/5.0"}, verify=False, timeout=5)
+                            if m_res.status_code == 200:
+                                html = m_res.text
+                                m_title = re.search(r'id="MainContent_FormViewMainIndicators_LabelFund"?[^>]*>([^<]+)</span>', html)
+                                if m_title: 
+                                    meta["title"] = m_title.group(1).strip()
+                                    meta["category"] = infer_category(meta["title"])
+                                m_aum = re.search(r'id="MainContent_FormViewMainIndicators_LabelPortfolioValue"?[^>]*>([^<]+)</span>', html)
+                                if m_aum: meta["aum"] = parse_number(m_aum.group(1)) or 0.0
+                                m_inv = re.search(r'id="MainContent_FormViewMainIndicators_LabelInvestorCount"?[^>]*>([^<]+)</span>', html)
+                                if m_inv: meta["investors"] = parse_number(m_inv.group(1)) or 0.0
+
+                            return df_sorted, meta, "TEFAS API"
+        except:
+            continue
+
+    # 2. YÖNTEM (Yedek): İş Yatırım API
+    try:
+        session = requests.Session()
+        session.verify = False
+        session.headers.update({"User-Agent": "Mozilla/5.0"})
+        session.get("https://www.isyatirim.com.tr/tr-tr/analiz/fon/Sayfalar/Tarihsel-Fiyat-Bilgileri.aspx", timeout=5)
         
-        return df_sorted, meta, "OK"
-    except Exception as e:
-        return None, {}, f"API Bağlantı Hatası: {str(e)}"
+        api_url = "https://www.isyatirim.com.tr/_layouts/15/IsYatirim.Website/Common/Data.aspx/YatirimFonGecmisGetiri"
+        params = {"fonKod": code.upper(), "baslangic": start_date.strftime("%d-%m-%Y"), "bitis": end_date.strftime("%d-%m-%Y")}
+        
+        res = session.get(api_url, params=params, headers={"X-Requested-With": "XMLHttpRequest"}, timeout=HTTP_TIMEOUT)
+        if res.status_code == 200:
+            values = res.json().get("value")
+            if values:
+                df = pd.DataFrame(values)
+                if "Tarih" in df.columns and "Fiyat" in df.columns:
+                    df["date"] = pd.to_datetime(df.get("Tarih"), dayfirst=True, errors="coerce")
+                    df["price"] = df.get("Fiyat").apply(parse_number)
+                    df = df.dropna(subset=["date", "price"])
+                    df = df[df["price"] > 0]
+                    if len(df) >= 2:
+                        df_sorted = df.sort_values("date").drop_duplicates(subset=["date"], keep="last").tail(MAX_DAYS + 1).reset_index(drop=True)
+                        meta["title"] = code.upper()
+                        meta["category"] = infer_category(code.upper())
+                        return df_sorted[["date", "price"]], meta, "İş Yatırım"
+    except:
+        pass
+
+    return None, {}, "Tüm resmi API kanalları yanıt vermedi."
 
 # ============================================================
 # METRİKLER (MDD, SORTINO)
@@ -351,9 +390,9 @@ req_codes = list(dict.fromkeys(req_codes))
 today, start_date = dt.date.today(), dt.date.today() - dt.timedelta(days=LOOKBACK_CALENDAR_DAYS)
 
 # ============================================================
-# ANA VERİ TOPLAMA BLOĞU (V15 - 2026 TEFAS API)
+# ANA VERİ TOPLAMA BLOĞU (V16 - Saf İstihbarat)
 # ============================================================
-with st.spinner("2026 Yeni Nesil TEFAS API Motoru Çalışıyor..."):
+with st.spinner("Saf TEFAS & İş Yatırım API Motoru Çalışıyor..."):
     calc_funds, fail_codes, error_logs = [], [], []
     bar, st_text = st.progress(0), st.empty()
     tot = len(req_codes)
@@ -361,18 +400,18 @@ with st.spinner("2026 Yeni Nesil TEFAS API Motoru Çalışıyor..."):
     for i, code in enumerate(req_codes):
         st_text.text(f"İndiriliyor ve Analiz Ediliyor: {code} ({i+1}/{tot})")
         
-        series, meta, err = fetch_fund_data_via_new_api(code, start_date, today)
+        series, meta, src = fetch_fund_data_safely(code, start_date, today)
 
         if series is not None:
             metrics = compute_fund_metrics(series, meta)
-            metrics.update({"code": code, "source": "2026 TEFAS API", "valor": valor_map.get(code, 0.0)})
+            metrics.update({"code": code, "source": src, "valor": valor_map.get(code, 0.0)})
             a_ok = metrics["aum"] >= min_aum if metrics["aum"] > 0 else True
             i_ok = metrics["investors"] >= min_investors if metrics["investors"] > 0 else True
             metrics["filtered_out"] = not (a_ok and i_ok)
             calc_funds.append(metrics)
         else: 
             fail_codes.append(code)
-            error_logs.append(f"[{code}] İstihbarat API hatası: {err}")
+            error_logs.append(f"[{code}] Tüm resmi API kanalları boş döndü.")
             
         bar.progress((i + 1) / tot)
         
@@ -380,7 +419,7 @@ with st.spinner("2026 Yeni Nesil TEFAS API Motoru Çalışıyor..."):
 
 if error_logs:
     with st.expander("🛠️ Hata Logları (Fonlar Neden İndirilemedi?)", expanded=True):
-        st.write("Aşağıdaki fonlar için 2026 TEFAS API yanıt vermedi.")
+        st.write("Aşağıdaki fonlar için resmi API kanallarından veri alınamadı.")
         for log in error_logs: st.code(log)
 
 st.success(f"✅ {len(calc_funds)} fonun verisi başarıyla indirildi. Skorlamaya geçiliyor...")
@@ -460,7 +499,7 @@ out.seek(0)
 # ============================================================
 # SONUÇ EKRANI
 # ============================================================
-st.download_button("📥 V15 Excel Çıktısını İndir", data=out, file_name="fon_vade_analizi_V15.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+st.download_button("📥 V16 Excel Çıktısını İndir", data=out, file_name="fon_vade_analizi_V16.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 st.subheader("📊 Fon Sıralaması Önizleme")
-df_p = pd.DataFrame([{"Fon": f["code"], "Kategori": f.get("category", "-"), "1H": fmt(f.get("score_5")), "1A": fmt(f.get("score_21")), "3A": fmt(f.get("score_63")), "1Y": fmt(f.get("score_252")), "Nihai Skor": fmt(f.get("final_score")), "Nihai Karar": fmt(f.get("final_decision")), "Güven": fmt(f.get("confidence")), "Kaynak": "2026 TEFAS API"} for f in calc_funds])
+df_p = pd.DataFrame([{"Fon": f["code"], "Kategori": f.get("category", "-"), "1H": fmt(f.get("score_5")), "1A": fmt(f.get("score_21")), "3A": fmt(f.get("score_63")), "1Y": fmt(f.get("score_252")), "Nihai Skor": fmt(f.get("final_score")), "Nihai Karar": fmt(f.get("final_decision")), "Güven": fmt(f.get("confidence")), "Kaynak": fmt(f.get("source"))} for f in calc_funds])
 st.dataframe(df_p, use_container_width=True, hide_index=True)
