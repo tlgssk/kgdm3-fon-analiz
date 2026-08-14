@@ -5,3 +5,4 @@ tefas-crawler
 pytefas
 requests
 cloudscraper
+tefas
