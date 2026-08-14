@@ -16,14 +16,14 @@ from openpyxl.utils import get_column_letter
 # ============================================================
 
 st.set_page_config(
-    page_title="Multi-Vade Fon Analizi V5",
+    page_title="Multi-Vade Fon Analizi V6",
     page_icon="📈",
     layout="wide",
 )
 
-st.title("📈 Multi-Vade Fon Analizi V5")
+st.title("📈 Multi-Vade Fon Analizi V6")
 st.caption(
-    "Tam Düzeltilmiş Z-Skor Mantığı + None/0 Ayrımı + Filtre/Kategori Kusursuzlaştırması"
+    "Gelişmiş Z-Skor Motoru + Kategori/Global Harmanlama + Tanh Benchmark Skoru + Asimetrik Sortino"
 )
 
 # ============================================================
@@ -185,7 +185,7 @@ def fetch_isyatirim_series(fund_code: str) -> Optional[pd.DataFrame]:
     except Exception: return None
 
 # ============================================================
-# FON METRİKLERİ + MDD + SORTINO
+# FON METRİKLERİ + MDD + SORTINO (V6)
 # ============================================================
 
 def compute_max_drawdown(prices: List[float]) -> float:
@@ -198,13 +198,39 @@ def compute_max_drawdown(prices: List[float]) -> float:
             if dd < max_dd: max_dd = dd
     return max_dd
 
-def compute_sortino(returns: List[float], daily_rf: float = 0.0) -> float:
+def compute_sortino(
+    returns: List[float],
+    daily_rf: float = 0.0,
+    min_downside_obs: int = 2,
+    max_sortino: float = 10.0,
+) -> float:
+    """V6 Asimetrik ve Sınırlandırılmış Sortino Oranı"""
     if not returns: return 0.0
-    mean_excess = (sum(returns) / len(returns)) - daily_rf
-    downside = [r - daily_rf for r in returns if r < daily_rf]
-    if not downside: return mean_excess * 10 if mean_excess > 0 else 0.0  
-    downside_vol = math.sqrt(sum(r ** 2 for r in downside) / len(downside))
-    return mean_excess / downside_vol if downside_vol > 1e-12 else 0.0
+
+    clean_returns = [float(r) for r in returns if r is not None and math.isfinite(float(r))]
+    if not clean_returns: return 0.0
+
+    excess_returns = [r - daily_rf for r in clean_returns]
+    mean_excess = sum(excess_returns) / len(excess_returns)
+
+    # Gerçek downside gözlemleri
+    downside = [x for x in (min(0.0, r - daily_rf) for r in clean_returns) if x < 0]
+
+    if not downside:
+        return max_sortino if mean_excess > 0 else 0.0
+
+    # Minimum gözlem kuralı ile downside_vol hesaplama
+    if len(downside) < min_downside_obs:
+        downside_sum_sq = sum(x ** 2 for x in downside)
+        downside_vol = math.sqrt(downside_sum_sq / len(clean_returns))
+    else:
+        downside_vol = math.sqrt(sum(x ** 2 for x in downside) / len(downside))
+
+    if downside_vol <= 1e-12:
+        return max_sortino if mean_excess > 0 else 0.0
+
+    sortino = mean_excess / downside_vol
+    return max(-max_sortino, min(max_sortino, sortino))
 
 def compute_fund_metrics(series: Optional[pd.DataFrame]) -> Optional[dict]:
     if series is None or len(series) < 2: return None
@@ -232,48 +258,96 @@ def compute_fund_metrics(series: Optional[pd.DataFrame]) -> Optional[dict]:
     }
 
 # ============================================================
-# VADE SKORU
+# VADE SKORU (V6)
 # ============================================================
 
 def calculate_period_scores(funds: List[dict], days: int, daily_rf: float, use_category: bool):
-    # 1. Aşama: Tüm fonlar için (filtre dışı olanlar dahil) ham metrikleri hesapla
+    """
+    V6 Vade Skoru
+    Skor bileşenleri: Kümülatif Getiri (%30), Sharpe (%25), Sortino (%20), MDD (%25)
+    """
+    # 1. HAM METRİKLERİ HESAPLA
     for item in funds:
-        if len(item["daily_returns"]) < days:
+        returns = item.get("daily_returns", [])
+        prices = item.get("prices", [])
+
+        if len(returns) < days or len(prices) < days + 1:
             item[f"score_{days}"] = None
             item[f"karar_{days}"] = "YETERSİZ VERİ"
-            for m in ["mean", "vol", "shp", "cum", "mdd", "sortino"]: item[f"{m}_{days}"] = None
+            for m in ["mean", "vol", "shp", "cum", "mdd", "sortino"]:
+                item[f"{m}_{days}"] = None
             continue
 
-        slice_ret = item["daily_returns"][-days:]
-        slice_prices = item["prices"][-(days + 1):]
+        slice_ret = returns[-days:]
+        slice_prices = prices[-(days + 1):]
+
         mean_ret = sum(slice_ret) / len(slice_ret)
-        vol = (sum((r - mean_ret) ** 2 for r in slice_ret) / len(slice_ret)) ** 0.5
+        variance = sum((r - mean_ret) ** 2 for r in slice_ret) / len(slice_ret)
+        vol = math.sqrt(max(0.0, variance))
+        sharpe = (mean_ret - daily_rf) / vol if vol > 1e-12 else 0.0
+        
+        start_price, end_price = slice_prices[0], slice_prices[-1]
+        cumulative = (end_price / start_price - 1.0) * 100.0 if start_price > 0 else None
+        
+        mdd = compute_max_drawdown(slice_prices)
+        sortino = compute_sortino(slice_ret, daily_rf=daily_rf)
 
         item[f"mean_{days}"] = mean_ret
         item[f"vol_{days}"] = vol
-        item[f"shp_{days}"] = (mean_ret - daily_rf) / vol if vol > 1e-12 else 0.0
-        item[f"cum_{days}"] = (slice_prices[-1] / slice_prices[0] - 1) * 100
-        item[f"mdd_{days}"] = compute_max_drawdown(slice_prices)
-        item[f"sortino_{days}"] = compute_sortino(slice_ret, daily_rf)
+        item[f"shp_{days}"] = sharpe
+        item[f"cum_{days}"] = cumulative
+        item[f"mdd_{days}"] = mdd
+        item[f"sortino_{days}"] = sortino
 
-    # 2. Aşama: Sadece geçerli ve filtreden GEÇEN fonları değerlendirme havuzuna (eval) al
-    valid_indices = [i for i, f in enumerate(funds) if not f.get("filtered_out") and f.get(f"cum_{days}") is not None]
+    # 2. DEĞERLENDİRME HAVUZU
+    valid_indices = [
+        i for i, f in enumerate(funds)
+        if (not f.get("filtered_out", False) and f.get(f"cum_{days}") is not None 
+            and f.get(f"shp_{days}") is not None and f.get(f"sortino_{days}") is not None 
+            and f.get(f"mdd_{days}") is not None)
+    ]
 
+    if not valid_indices:
+        for item in funds:
+            item[f"score_{days}"] = None
+            item[f"karar_{days}"] = "FİLTRE DIŞI" if item.get("filtered_out") else "YETERSİZ VERİ"
+        return
+
+    # 3. KATEGORİ HAVUZLARI
     categories = {}
     if use_category:
         for idx in valid_indices:
-            cat = funds[idx].get("category", "Diğer")
-            categories.setdefault(cat, []).append(idx)
+            category = funds[idx].get("category") or "Diğer"
+            categories.setdefault(category, []).append(idx)
     else:
         categories = {"ALL": valid_indices}
 
-    # İstatistiksel hesaplama yardımcısı
-    def get_stats(vals):
-        if not vals: return 0.0, 0.0
-        m = sum(vals) / len(vals)
-        std = (sum((v - m) ** 2 for v in vals) / len(vals)) ** 0.5
-        return m, std
+    # 4. İSTATİSTİK YARDIMCILARI
+    def clean_values(indices, field):
+        values = []
+        for i in indices:
+            value = funds[i].get(f"{field}_{days}")
+            if value is None: continue
+            try:
+                value = float(value)
+                if math.isfinite(value): values.append(value)
+            except Exception: continue
+        return values
 
+    def get_stats(values):
+        if not values: return 0.0, 0.0
+        mean_value = sum(values) / len(values)
+        variance = sum((x - mean_value) ** 2 for x in values) / len(values)
+        return mean_value, math.sqrt(max(0.0, variance))
+
+    # 5. SINIRLANDIRILMIŞ Z-SKOR
+    Z_LIMIT = 2.5
+    def z_score(value, mean_value, std):
+        if value is None or std <= 1e-12: return 0.0
+        z = (float(value) - mean_value) / std
+        return max(-Z_LIMIT, min(Z_LIMIT, z))
+
+    # 6. SKORLAMA YARDIMCISI
     def apply_scoring(eval_indices, target_indices):
         if len(eval_indices) < 2:
             for idx in target_indices:
@@ -281,41 +355,53 @@ def calculate_period_scores(funds: List[dict], days: int, daily_rf: float, use_c
                 funds[idx][f"karar_{days}"] = "YETERSİZ VERİ"
             return
 
-        m_mean, s_mean = get_stats([funds[i][f"mean_{days}"] for i in eval_indices])
-        m_shp, s_shp = get_stats([funds[i][f"shp_{days}"] for i in eval_indices])
-        m_cum, s_cum = get_stats([funds[i][f"cum_{days}"] for i in eval_indices])
-        m_srt, s_srt = get_stats([funds[i][f"sortino_{days}"] for i in eval_indices])
-        m_mdd, s_mdd = get_stats([funds[i][f"mdd_{days}"] for i in eval_indices])
+        mean_cum = get_stats(clean_values(eval_indices, "cum"))
+        mean_shp = get_stats(clean_values(eval_indices, "shp"))
+        mean_srt = get_stats(clean_values(eval_indices, "sortino"))
+        mean_mdd = get_stats(clean_values(eval_indices, "mdd"))
 
-        def z(val, m, std): return (val - m) / std if std > 1e-12 else 0.0
+        W_CUM, W_SHP, W_SRT, W_MDD = 0.30, 0.25, 0.20, 0.25
 
         for idx in target_indices:
             item = funds[idx]
-            z_m = z(item[f"mean_{days}"], m_mean, s_mean)
-            z_s = z(item[f"shp_{days}"], m_shp, s_shp)
-            z_c = z(item[f"cum_{days}"], m_cum, s_cum)
-            z_srt = z(item[f"sortino_{days}"], m_srt, s_srt)
-            z_mdd = z(item[f"mdd_{days}"], m_mdd, s_mdd)
+            z_cum = z_score(item.get(f"cum_{days}"), mean_cum[0], mean_cum[1])
+            z_shp = z_score(item.get(f"shp_{days}"), mean_shp[0], mean_shp[1])
+            z_srt = z_score(item.get(f"sortino_{days}"), mean_srt[0], mean_srt[1])
+            z_mdd = z_score(item.get(f"mdd_{days}"), mean_mdd[0], mean_mdd[1])
 
-            raw_score = 50 + 12 * z_m + 15 * z_s + 12 * z_c + 12 * z_srt + 10 * z_mdd - (safe_float(item.get("valor", 0)) * 1.2)
-            score = int(round(max(0, min(100, raw_score))))
-            
+            weighted_z = (W_CUM * z_cum + W_SHP * z_shp + W_SRT * z_srt + W_MDD * z_mdd)
+            raw_score = 50.0 + 20.0 * weighted_z
+            raw_score -= safe_float(item.get("valor", 0)) * 1.2
+
+            score = int(round(max(0.0, min(100.0, raw_score))))
             item[f"score_{days}"] = score
+
             if score >= 60: item[f"karar_{days}"] = "GÜÇLÜ AL"
             elif score >= 40: item[f"karar_{days}"] = "ASIL LİSTE"
             elif score >= 25: item[f"karar_{days}"] = "NÖTR"
             else: item[f"karar_{days}"] = "ACİL SAT"
 
-    # 3. Aşama: Kategori bazlı skorlama (Tek fonlu kategoriler için Global Havuz kurtarması)
-    for cat, indices in categories.items():
-        if len(indices) < 2:
-            apply_scoring(eval_indices=valid_indices, target_indices=indices) # Kendi kategorisinde tekse, tüm fonlarla yarıştır
-        else:
+    # 7. KATEGORİ SKORLAMASI (Global/Kategori Harmanlaması)
+    for category, indices in categories.items():
+        n = len(indices)
+        if n >= 10:
             apply_scoring(eval_indices=indices, target_indices=indices)
+        elif n >= 5:
+            apply_scoring(eval_indices=valid_indices, target_indices=indices)
+            global_scores = {idx: funds[idx].get(f"score_{days}") for idx in indices}
+            apply_scoring(eval_indices=indices, target_indices=indices)
+            for idx in indices:
+                cat_score = funds[idx].get(f"score_{days}")
+                glob_score = global_scores.get(idx)
+                if cat_score is not None and glob_score is not None:
+                    blended = int(round(0.60 * cat_score + 0.40 * glob_score))
+                    funds[idx][f"score_{days}"] = max(0, min(100, blended))
+        else:
+            apply_scoring(eval_indices=valid_indices, target_indices=indices)
 
-    # 4. Aşama: Filtreden elenenlere özel durum ataması (Ham verileri korundu, sadece skor iptal)
-    for idx, item in enumerate(funds):
-        if item.get("filtered_out") and item.get(f"cum_{days}") is not None:
+    # 8. FİLTRE DIŞI FONLAR
+    for item in funds:
+        if item.get("filtered_out", False) and item.get(f"cum_{days}") is not None:
             item[f"score_{days}"] = None
             item[f"karar_{days}"] = "FİLTRE DIŞI"
 
@@ -351,6 +437,13 @@ def fetch_kut_benchmark(start_date: dt.date, end_date: dt.date) -> Optional[pd.D
     df["benchmark"] = (KUT_GOLD_WEIGHT * (g_try / g_try.iloc[0])) + (KUT_SILVER_WEIGHT * (s_try / s_try.iloc[0])) + KUT_CASH_WEIGHT
     return df[["date", "benchmark"]].reset_index(drop=True)
 
+def benchmark_score_from_diff(diff: float) -> Optional[int]:
+    """V6 Tanh ile yumuşatılmış Benchmark Skoru"""
+    if diff is None: return None
+    normalized = math.tanh(diff / 5.0)
+    score = 50.0 + 40.0 * normalized
+    return int(round(max(0.0, min(100.0, score))))
+
 def calculate_kut_benchmark_metrics(funds, benchmark_df):
     bench_returns = {d: ((benchmark_df["benchmark"].iloc[-1] / benchmark_df["benchmark"].iloc[-(d+1)] - 1) * 100) if benchmark_df is not None and not benchmark_df.empty and len(benchmark_df) > d and benchmark_df["benchmark"].iloc[-(d+1)] > 0 else None for d in PERIODS.values()}
 
@@ -365,10 +458,10 @@ def calculate_kut_benchmark_metrics(funds, benchmark_df):
                 item[f"benchmark_{days}"], item[f"benchmark_diff_{days}"], item[f"benchmark_score_{days}"] = None, None, None
             else:
                 diff = fr - br
-                item[f"benchmark_{days}"], item[f"benchmark_diff_{days}"], item[f"benchmark_score_{days}"] = br, diff, int(round(max(0, min(100, 50 + diff * 5))))
+                item[f"benchmark_{days}"], item[f"benchmark_diff_{days}"], item[f"benchmark_score_{days}"] = br, diff, benchmark_score_from_diff(diff)
 
 # ============================================================
-# TREND + GÜVEN + NİHAİ SKOR
+# TREND + GÜVEN + NİHAİ SKOR (V6)
 # ============================================================
 
 def calculate_trends(funds):
@@ -378,33 +471,73 @@ def calculate_trends(funds):
         item["trend_1y"] = "VERİ YOK" if s252 is None or s63 is None else ("YUKARI ↑" if s63 - s252 >= 10 else "AŞAĞI ↓" if s63 - s252 <= -10 else "YATAY →")
 
 def calculate_confidence(item):
-    scores = [float(item[f"score_{d}"]) for d in PERIODS.values() if item.get(f"score_{d}") is not None]
+    scores = []
+    for days in PERIODS.values():
+        score = item.get(f"score_{days}")
+        if score is None: continue
+        try:
+            score = float(score)
+            if math.isfinite(score): scores.append(score)
+        except Exception: continue
+
     if not scores: return "DÜŞÜK"
-    data_ratio, mean = len(scores) / len(PERIODS), sum(scores) / len(scores)
-    dispersion = (sum((x - mean) ** 2 for x in scores) / len(scores)) ** 0.5
+
+    data_ratio = len(scores) / len(PERIODS)
+    mean_score = sum(scores) / len(scores)
+    dispersion = math.sqrt(sum((x - mean_score) ** 2 for x in scores) / len(scores))
+
     if data_ratio == 1.0 and dispersion <= 10: return "ÇOK YÜKSEK"
     if data_ratio >= 0.75 and dispersion <= 15: return "YÜKSEK"
-    return "ORTA" if data_ratio >= 0.50 else "DÜŞÜK"
+    if data_ratio >= 0.50: return "ORTA"
+    return "DÜŞÜK"
 
 def calculate_final_scores(funds):
     for item in funds:
-        w_sum = sum(item[f"score_{d}"] * w for d, w in FINAL_WEIGHTS.items() if item.get(f"score_{d}") is not None)
-        w_tot = sum(w for d, w in FINAL_WEIGHTS.items() if item.get(f"score_{d}") is not None)
-        
-        if w_tot == 0:
+        available_scores = []
+        for days, weight in FINAL_WEIGHTS.items():
+            score = item.get(f"score_{days}")
+            if score is None: continue
+            try:
+                score = float(score)
+                if math.isfinite(score): available_scores.append((days, weight, score))
+            except Exception: continue
+
+        if not available_scores:
             item["final_score"], item["final_decision"], item["confidence"] = None, "YETERSİZ VERİ", "DÜŞÜK"
             continue
 
-        base_final = w_sum / w_tot
-        if item.get("benchmark_active"):
-            b_scores = [item[f"benchmark_score_{d}"] for d in PERIODS.values() if item.get(f"benchmark_score_{d}") is not None]
-            final_score = (base_final * 0.80 + (sum(b_scores)/len(b_scores)) * 0.20) if b_scores else base_final
-        else:
-            final_score = base_final
+        total_weight = sum(weight for _, weight, _ in available_scores)
+        weighted_sum = sum(score * weight for _, weight, score in available_scores)
+        base_final = weighted_sum / total_weight if total_weight > 0 else None
 
-        final_score = int(round(max(0, min(100, final_score))))
+        if base_final is None:
+            item["final_score"], item["final_decision"], item["confidence"] = None, "YETERSİZ VERİ", "DÜŞÜK"
+            continue
+
+        final_score = base_final
+        if item.get("benchmark_active"):
+            benchmark_scores = []
+            for days in PERIODS.values():
+                b_score = item.get(f"benchmark_score_{days}")
+                if b_score is None: continue
+                try:
+                    b_score = float(b_score)
+                    if math.isfinite(b_score): benchmark_scores.append(b_score)
+                except Exception: continue
+            
+            if benchmark_scores:
+                benchmark_average = sum(benchmark_scores) / len(benchmark_scores)
+                final_score = base_final * 0.80 + benchmark_average * 0.20
+
+        final_score = int(round(max(0.0, min(100.0, final_score))))
         item["final_score"] = final_score
-        item["final_decision"] = "GÜÇLÜ AL" if final_score >= 70 else "AL" if final_score >= 60 else "ASIL LİSTE" if final_score >= 45 else "NÖTR" if final_score >= 30 else "ACİL SAT"
+
+        if final_score >= 70: item["final_decision"] = "GÜÇLÜ AL"
+        elif final_score >= 60: item["final_decision"] = "AL"
+        elif final_score >= 45: item["final_decision"] = "ASIL LİSTE"
+        elif final_score >= 30: item["final_decision"] = "NÖTR"
+        else: item["final_decision"] = "ACİL SAT"
+
         item["confidence"] = calculate_confidence(item)
 
 # ============================================================
@@ -418,7 +551,8 @@ with st.sidebar:
     min_investors = st.number_input("Minimum Yatırımcı Sayısı", min_value=0, value=100, step=50)
     use_category_scoring = st.checkbox("Kategori bazlı skorlama kullan", value=True)
 
-daily_rf = annual_rf_rate / 252.0
+# V6: Günlük Risksiz Getiri (Bileşik formül)
+daily_rf = ((1 + annual_rf_rate / 100.0) ** (1 / 252.0) - 1) * 100.0
 
 uploaded_file = st.file_uploader("Excel Dosyanızı Yükleyin (Fon_Listesi içeren):", type=["xlsx"])
 if not uploaded_file: st.stop()
@@ -541,8 +675,8 @@ output.seek(0)
 # STREAMLIT EKRAN ÇIKTILARI
 # ============================================================
 
-st.success("✅ Multi-Vade V5 analizi (Kusursuz Filtreleme ve Z-Skor Kurtarması ile) tamamlandı!")
-st.download_button(label="📥 V5 Excel Çıktısını İndir", data=output, file_name="fon_vade_analizi_V5.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+st.success("✅ Multi-Vade V6 analizi (Gelişmiş Z-Skor Mimarisi ile) tamamlandı!")
+st.download_button(label="📥 V6 Excel Çıktısını İndir", data=output, file_name="fon_vade_analizi_V6.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 st.subheader("📊 Fon Sıralaması Önizleme")
 df_preview = pd.DataFrame([{ "Fon": f["code"], "Kategori": f.get("category", "-"), "1H": fmt(f.get("score_5")), "1A": fmt(f.get("score_21")), "3A": fmt(f.get("score_63")), "1Y": fmt(f.get("score_252")), "Nihai Skor": fmt(f.get("final_score")), "Nihai Karar": f.get("final_decision", "-"), "AUM": fmt(f.get("aum")) } for f in calculated_funds])
