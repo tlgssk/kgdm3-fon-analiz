@@ -23,9 +23,9 @@ LOOKBACK_CALENDAR_DAYS = 35
 TARGET_TRADING_DAYS = 10
 MIN_INVESTOR_COUNT = 5000
 HTTP_TIMEOUT = 8
-APP_VERSION = "5.0.0"
+APP_VERSION = "5.0.1"
 
-# GITHUB ÜZERİNDEKİ EXCEL DOSYANIZIN RAW LİNKİ:
+# GITHUB ÜZERİNDEKİ EXCEL DOSYANIZIN RAW LİNKİNİ BURAYA YAPIŞTIRIN:
 GITHUB_EXCEL_URL = "https://github.com/tlgssk/kgdm3-fon-analiz/raw/refs/heads/main/Menkul_Kiymet_Yatirim_Fonlari_EXCEL_Tum_Veri_2026-08-14.xlsx"
 
 COLOR_NAVY = "1F4E79"
@@ -158,26 +158,49 @@ def fetch_isyatirim_series(fund_code: str) -> Optional[pd.DataFrame]:
     except (requests.RequestException, ValueError, TypeError):
         return None
 
+def fetch_fintables_series(fund_code: str) -> Optional[pd.DataFrame]:
+    code = normalize_fund_code(fund_code)
+    if not code: return None
+    
+    url = f"https://fintables.com/fonlar/{code.lower()}"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128 Safari/537.36"}
+    try:
+        response = requests.get(url, headers=headers, timeout=HTTP_TIMEOUT)
+        if response.status_code != 200: return None
+        
+        html = response.text
+        pattern = re.compile(r'"date"\s*:\s*"(\d{4}-\d{2}-\d{2})"[^{}]{0,500}?"price"\s*:\s*([0-9]+(?:\.[0-9]+)?)', re.IGNORECASE)
+        matches = pattern.findall(html)
+        if not matches: return None
+        
+        rows = []
+        for date_text, price_text in matches:
+            date_value = pd.to_datetime(date_text, errors="coerce")
+            price_value = parse_number(price_text)
+            if pd.notna(date_value) and price_value is not None and price_value > 0:
+                rows.append({"date": date_value, "price": price_value, "aum": 0.0, "investors": 0.0})
+                
+        if not rows: return None
+        df = pd.DataFrame(rows)
+        df = df.sort_values("date").drop_duplicates(subset=["date"], keep="last")
+        if len(df) < 2: return None
+        return df.tail(TARGET_TRADING_DAYS + 1).reset_index(drop=True)
+    except (requests.RequestException, ValueError, TypeError, re.error):
+        return None
+
 def fetch_fintables_asset_allocation(fund_code: str) -> dict:
-    """
-    Fintables üzerinden fonun en yüksek ağırlıklı varlık dağılımını (hisse yoğunlaşmasını) çeker.
-    Eğer veri bulunamazsa varsayılan orta seviye değer döner.
-    """
     code = normalize_fund_code(fund_code)
     url = f"https://fintables.com/fonlar/{code.lower()}"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128 Safari/537.36"}
     
-    result = {"stock_ratio": 50.0, "concentration_score": 5.0} # Varsayılan
+    result = {"stock_ratio": 50.0}
     try:
         response = requests.get(url, headers=headers, timeout=HTTP_TIMEOUT)
         if response.status_code != 200: return result
         html = response.text
-        
-        # HTML içinden hisse senedi oranını yakalama simülasyonu/regex taraması
         match_stock = re.search(r'Hisse Senedi["\s:]+([0-9]+(?:\.[0-9]+)?)', html, re.IGNORECASE)
         if match_stock:
             result["stock_ratio"] = float(match_stock.group(1))
-            
         return result
     except Exception:
         return result
@@ -218,7 +241,6 @@ def compute_fund_metrics(series: Optional[pd.DataFrame], fund_code: str) -> Opti
     aum_change = ((aums[-1] - aums[0]) / aums[0] * 100) if aums[0] > 0 else 0.0
     inv_change = ((investors[-1] - investors[0]) / investors[0] * 100) if investors[0] > 0 else 0.0
 
-    # Varlık dağılımı / Hisse yoğunlaşma verisini çek
     allocation = fetch_fintables_asset_allocation(fund_code)
 
     return {
@@ -526,7 +548,6 @@ for d in range(1, n_days + 1):
         val = item["valor"]
         v_pen = (val * 0.5) if val is not None else 0.0
         
-        # VARLIK DAĞILIMI (HİSSE YOĞUNLAŞMASI) DAHİL GÜNCELLENMİŞ FORMÜL:
         raw_score = 50 + 10 * z_m[i] + 15 * z_s[i] + 10 * z_c[i] + 10 * z_a[i] + 10 * z_i[i] + 10 * z_st[i] - 15 * z_d[i] - v_pen
         score = int(round(max(5.0, min(95.0, raw_score))))
         item["running_scores"].append(score)
@@ -636,7 +657,7 @@ if source_errors:
         st.dataframe(pd.DataFrame(source_errors), use_container_width=True, hide_index=True)
 
 output = create_excel_output(wb=wb, ws_list=ws_list, calculated_funds=calculated_funds, n_days=n_days)
-st.success(f"✅ Analiz tamamlandı. Fonların hisse senedi varlık dağılım oranları taranarak puana dahil edildi.")
+st.success(f"✅ Analiz tamamlandı. ({source_mode.upper()} kaynağından okundu ve hisse oranları tarandı).")
 
 st.download_button(label="📥 Güncellenmiş Excel'i İndir", data=output, file_name="fonlar_guncel.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 st.caption(f"KGDM-3 Fon Analiz Otomasyonu v{APP_VERSION} | Analiz tarihi: {today.strftime('%d.%m.%Y')}")
