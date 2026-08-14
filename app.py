@@ -16,12 +16,12 @@ from openpyxl.utils import get_column_letter
 st.set_page_config(page_title="KGDM-3 Fon Analiz Otomasyonu", page_icon="📊", layout="wide")
 
 st.title("📊 KGDM-3 Fon Analiz ve Excel Otomasyonu")
-st.caption("GitHub Entegrasyonu | 10.000 Yatırımcı Alt Sınırı, Dengelenmiş Z-Skor ve Son 5 Günlük Trend Analizi.")
+st.caption("GitHub Entegrasyonu | 5.000 Yatırımcı Alt Sınırı, Dengelenmiş Z-Skor ve Son 5 Günlük Trend Analizi.")
 
 FUND_KINDS = ("YAT", "EMK", "BYF")
 LOOKBACK_CALENDAR_DAYS = 35
 TARGET_TRADING_DAYS = 10
-MIN_INVESTOR_COUNT = 10000  # En az yatırımcı sayısı sınırı
+MIN_INVESTOR_COUNT = 5000  # En az yatırımcı sayısı sınırı
 HTTP_TIMEOUT = 8
 APP_VERSION = "4.9.0"
 
