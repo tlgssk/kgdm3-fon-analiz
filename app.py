@@ -26,7 +26,7 @@ HTTP_TIMEOUT = 10
 APP_VERSION = "5.5.0"
 
 # GITHUB ÜZERİNDEKİ EXCEL DOSYANIZIN RAW LİNKİNİ BURAYA YAPIŞTIRIN:
-GITHUB_EXCEL_URL = "https://raw.githubusercontent.com/KULLANICI_ADINIZ/REPO_ADINIZ/main/fonlar.xlsx"
+GITHUB_EXCEL_URL = "https://github.com/tlgssk/kgdm3-fon-analiz/raw/refs/heads/main/Menkul_Kiymet_Yatirim_Fonlari_EXCEL_Tum_Veri_2026-08-14.xlsx"
 
 COLOR_NAVY = "1F4E79"
 COLOR_GREEN = "008000"
