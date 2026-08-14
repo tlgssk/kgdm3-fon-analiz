@@ -15,13 +15,13 @@ from openpyxl.utils import get_column_letter
 st.set_page_config(page_title="KGDM-3 Fon Analiz Otomasyonu", page_icon="📊", layout="wide")
 
 st.title("📊 KGDM-3 Fon Analiz ve Excel Otomasyonu")
-st.caption("Veri şelalesi, AUM/Yatırımcı değişimi (balina takibi), MaxDD risk cezası ve son 5 günlük trend analizi ile güncellenmiş skorlama.")
+st.caption("Yüksek Getiri & Sermaye Koruma Stratejisi | Balina Takibi, MaxDD Kalkanı ve Son 5 Günlük Trend Analizi.")
 
 FUND_KINDS = ("YAT", "EMK", "BYF")
 LOOKBACK_CALENDAR_DAYS = 35
 TARGET_TRADING_DAYS = 10
 HTTP_TIMEOUT = 8
-APP_VERSION = "4.5.0"
+APP_VERSION = "4.6.0"
 
 COLOR_NAVY = "1F4E79"
 COLOR_GREEN = "008000"
@@ -492,11 +492,14 @@ for d in range(1, n_days + 1):
     for i, item in enumerate(calculated_funds):
         val = item["valor"]
         v_pen = (val * 0.5) if val is not None else 0.0
-        raw_score = 50 + 10 * z_m[i] + 15 * z_s[i] + 10 * z_c[i] + 10 * z_a[i] + 10 * z_i[i] - 5 * z_d[i] - v_pen
+        
+        # OMRON / DENGELI YÜKSEK GETİRİ & SERMAYE KORUMA FORMÜLÜ:
+        # Getiri(15) + Sharpe(20) + Kümülatif(15) + AUM(10) + Yatırımcı(10) - MaxDD Cezası(30) - Valör
+        raw_score = 50 + 15 * z_m[i] + 20 * z_s[i] + 15 * z_c[i] + 10 * z_a[i] + 10 * z_i[i] - 30 * z_d[i] - v_pen
+        
         score = int(round(max(0.0, min(100.0, raw_score))))
         item["running_scores"].append(score)
 
-# SON 5 GÜN SKORLARI, TREND VE KAZANÇ/KAYIP DURUMU ENTEGRASYONU
 for item in calculated_funds:
     scores = item["running_scores"]
     last_5 = scores[-5:] if len(scores) >= 5 else scores
@@ -571,7 +574,7 @@ def color_cells(value):
 try: styled_df = df_display.style.map(color_cells)
 except AttributeError: styled_df = df_display.style.applymap(color_cells)
 
-st.subheader("📊 KGDM-3 Fon Sonuçları (Son 5 Gün Trend Analizi)")
+st.subheader("📊 KGDM-3 Fon Sonuçları (Dengeli Büyüme & Sermaye Koruma)")
 st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
 strong_buy_count = sum(item["kgdm_skor"] >= 60 for item in calculated_funds)
@@ -597,7 +600,7 @@ if source_errors:
         st.dataframe(pd.DataFrame(source_errors), use_container_width=True, hide_index=True)
 
 output = create_excel_output(wb=wb, ws_list=ws_list, calculated_funds=calculated_funds, n_days=n_days)
-st.success(f"✅ Analiz tamamlandı. {len(calculated_funds)} fon için son 5 iş günlük ortalama skor ve trend analizi modele yansıtıldı.")
+st.success(f"✅ Analiz tamamlandı. {len(calculated_funds)} fon, yüksek getiri (getiri/momentum) ve sermaye koruma (Sharpe/MaxDD kalkanı) dengesine göre yeniden puanlandı.")
 
 st.download_button(label="📥 Güncellenmiş Excel'i İndir", data=output, file_name="fonlar_guncel.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 st.caption(f"KGDM-3 Fon Analiz Otomasyonu v{APP_VERSION} | Analiz tarihi: {today.strftime('%d.%m.%Y')}")
