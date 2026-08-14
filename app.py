@@ -15,13 +15,13 @@ from openpyxl.utils import get_column_letter
 st.set_page_config(page_title="KGDM-3 Fon Analiz Otomasyonu", page_icon="📊", layout="wide")
 
 st.title("📊 KGDM-3 Fon Analiz ve Excel Otomasyonu")
-st.caption("Veri şelalesi ile fonları analiz eder. Son 3 günlük trend ve kazanç/kayıp durumu dahil güncellenmiş KGDM-3 puanı hesaplar.")
+st.caption("Veri şelalesi, AUM/Yatırımcı değişimi (balina takibi), MaxDD risk cezası ve son 3 günlük trend analizi ile tam kapsamlı skorlama.")
 
 FUND_KINDS = ("YAT", "EMK", "BYF")
 LOOKBACK_CALENDAR_DAYS = 35
 TARGET_TRADING_DAYS = 10
 HTTP_TIMEOUT = 8
-APP_VERSION = "4.2.0"
+APP_VERSION = "4.3.0"
 
 COLOR_NAVY = "1F4E79"
 COLOR_GREEN = "008000"
@@ -96,7 +96,7 @@ def fetch_tefas_universe(start_date: dt.date, end_date: dt.date) -> pd.DataFrame
         else: df["aum"] = 0.0
         
         if "investors" in df.columns: df["investors"] = df["investors"].apply(parse_number)
-        else: df["investors"] = 0
+        else: df["investors"] = 0.0
             
         df = df.dropna(subset=["date", "code", "price"])
         df = df[df["price"] > 0]
@@ -117,24 +117,6 @@ def get_fund_series(universe: pd.DataFrame, fund_code: str) -> Optional[pd.DataF
     if len(rows) < 2: return None
     if len(rows) > TARGET_TRADING_DAYS + 1: rows = rows.tail(TARGET_TRADING_DAYS + 1)
     return rows.reset_index(drop=True)
-
-def get_latest_fund_info(universe: pd.DataFrame, fund_code: str) -> dict:
-    result = {"aum": 0.0, "investors": 0}
-    if universe is None or universe.empty: return result
-    code = normalize_fund_code(fund_code)
-    
-    rows = universe[universe["code"].astype(str).str.upper().eq(code)].copy()
-    if rows.empty: return result
-    
-    rows = rows.sort_values("date")
-    latest = rows.iloc[-1]
-    
-    aum = parse_number(latest.get("aum"))
-    investors = parse_number(latest.get("investors"))
-    
-    result["aum"] = aum if aum is not None else 0.0
-    result["investors"] = int(round(investors if investors is not None else 0))
-    return result
 
 def fetch_isyatirim_series(fund_code: str) -> Optional[pd.DataFrame]:
     code = normalize_fund_code(fund_code)
@@ -160,12 +142,14 @@ def fetch_isyatirim_series(fund_code: str) -> Optional[pd.DataFrame]:
         
         df["date"] = pd.to_datetime(df["Tarih"], dayfirst=True, errors="coerce")
         df["price"] = df["Fiyat"].apply(parse_number)
+        df["aum"] = 0.0
+        df["investors"] = 0.0
         df = df.dropna(subset=["date", "price"])
         df = df[df["price"] > 0]
         
         if len(df) < 2: return None
         df = df.sort_values("date").drop_duplicates(subset=["date"], keep="last").tail(TARGET_TRADING_DAYS + 1).reset_index(drop=True)
-        return df[["date", "price"]]
+        return df[["date", "price", "aum", "investors"]]
     except (requests.RequestException, ValueError, TypeError):
         return None
 
@@ -189,7 +173,7 @@ def fetch_fintables_series(fund_code: str) -> Optional[pd.DataFrame]:
             date_value = pd.to_datetime(date_text, errors="coerce")
             price_value = parse_number(price_text)
             if pd.notna(date_value) and price_value is not None and price_value > 0:
-                rows.append({"date": date_value, "price": price_value})
+                rows.append({"date": date_value, "price": price_value, "aum": 0.0, "investors": 0.0})
                 
         if not rows: return None
         df = pd.DataFrame(rows)
@@ -204,6 +188,9 @@ def compute_fund_metrics(series: Optional[pd.DataFrame]) -> Optional[dict]:
     df = series.copy()
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
     df["price"] = df["price"].apply(parse_number)
+    df["aum"] = df["aum"].apply(parse_number).fillna(0.0)
+    df["investors"] = df["investors"].apply(parse_number).fillna(0.0)
+    
     df = df.dropna(subset=["date", "price"])
     df = df[df["price"] > 0]
     df = df.sort_values("date").drop_duplicates(subset=["date"], keep="last").reset_index(drop=True)
@@ -212,19 +199,40 @@ def compute_fund_metrics(series: Optional[pd.DataFrame]) -> Optional[dict]:
     
     prices = df["price"].astype(float).tolist()
     dates = df["date"].dt.strftime("%d.%m").tolist()
-    daily_returns = []
+    aums = df["aum"].astype(float).tolist()
+    investors = df["investors"].astype(float).tolist()
     
+    daily_returns = []
     for previous, current in zip(prices[:-1], prices[1:]):
         if previous <= 0: daily_returns.append(0.0)
         else: daily_returns.append((current / previous - 1) * 100)
             
     if not daily_returns: return None
     
+    # MaxDD (Maksimum Düşüş) Hesaplama
+    peak = prices[0]
+    max_dd = 0.0
+    for price in prices:
+        if price > peak:
+            peak = price
+        dd = (price - peak) / peak * 100
+        if dd < max_dd:
+            max_dd = dd
+            
+    # AUM ve Yatırımcı Değişim Hızı (%)
+    aum_change = ((aums[-1] - aums[0]) / aums[0] * 100) if aums[0] > 0 else 0.0
+    inv_change = ((investors[-1] - investors[0]) / investors[0] * 100) if investors[0] > 0 else 0.0
+
     return {
         "dates": dates[1:], 
         "prices": prices,
         "daily_returns": daily_returns,
-        "n_days": len(daily_returns)
+        "n_days": len(daily_returns),
+        "aum": aums[-1],
+        "investors": int(round(investors[-1])),
+        "aum_change": aum_change,
+        "inv_change": inv_change,
+        "max_dd": abs(max_dd)
     }
 
 def zscore(values: list[float]) -> list[float]:
@@ -267,7 +275,7 @@ def create_excel_output(wb, ws_list, calculated_funds, n_days) -> io.BytesIO:
     headers = [
         "Fon Kodu", "Valör (Excel)", "KGDM-3 Skor (Ort3)", "Son 3 Gün Skorlar", "3 Günlük Trend", 
         "Model Kararı", "Ort. Getiri (%)", "Volatilite (%)", "Sharpe", "Kümülatif Getiri (%)", 
-        "Fon Büyüklüğü (AUM ₺)", "Yatırımcı Sayısı", "Fiyat Kaynağı"
+        "AUM Değişim (%)", "Yatırımcı Değişim (%)", "MaxDD (%)", "Fon Büyüklüğü (AUM ₺)", "Yatırımcı Sayısı", "Fiyat Kaynağı"
     ]
     for day in day_labels: headers.append(f"{day} Skor")
     for day in day_labels: headers.append(f"{day} % Getiri")
@@ -293,6 +301,9 @@ def create_excel_output(wb, ws_list, calculated_funds, n_days) -> io.BytesIO:
             round(item["volatility"], 4),
             round(item["sharpe_like"], 4), 
             round(item["cumulative_return"], 4),
+            round(item["aum_change"], 2),
+            round(item["inv_change"], 2),
+            round(item["max_dd"], 2),
             round(item["aum"], 2) if item["aum"] else None,
             int(item["investors"]) if item["investors"] else None, 
             item["data_source"]
@@ -301,8 +312,8 @@ def create_excel_output(wb, ws_list, calculated_funds, n_days) -> io.BytesIO:
         row_data.extend([format_percent(value) for value in item["daily_returns"]])
         ws_scores.append(row_data)
         
-    COL_VALOR = 2; COL_SCORE = 3; COL_DECISION = 6; COL_MEAN = 7
-    SCORE_START = 14
+    COL_VALOR = 2; COL_SCORE = 3; COL_DECISION = 6
+    SCORE_START = 17
     RETURN_START = SCORE_START + n_days
     
     green_font = Font(bold=True, color=COLOR_GREEN)
@@ -310,8 +321,8 @@ def create_excel_output(wb, ws_list, calculated_funds, n_days) -> io.BytesIO:
     yellow_font = Font(bold=True, color=COLOR_YELLOW)
     
     for row_number in range(2, ws_scores.max_row + 1):
-        ws_scores.cell(row=row_number, column=9).number_format = '#,##0.00 "₺"' # AUM
-        ws_scores.cell(row=row_number, column=10).number_format = '#,##0' # Yatırımcı
+        ws_scores.cell(row=row_number, column=14).number_format = '#,##0.00 "₺"' # AUM
+        ws_scores.cell(row=row_number, column=15).number_format = '#,##0' # Yatırımcı
         ws_scores.cell(row=row_number, column=COL_VALOR).number_format = '0'
         ws_scores.cell(row=row_number, column=COL_SCORE).number_format = '0'
         
@@ -432,10 +443,8 @@ for index, code in enumerate(requested_codes, start=1):
         progress.progress(index / total_funds, text=f"{code} işlenemedi...")
         continue
         
-    extra_data = get_latest_fund_info(universe, code)
     final_valor = excel_valor_dict.get(code)
-    
-    calculated_funds.append({"code": code, "data_source": data_source, "valor": final_valor, "aum": extra_data["aum"], "investors": extra_data["investors"], **metrics})
+    calculated_funds.append({"code": code, "data_source": data_source, "valor": final_valor, **metrics})
     progress.progress(index / total_funds, text=f"{code} işleniyor ({index}/{total_funds})")
 
 progress.empty()
@@ -453,9 +462,9 @@ for item in calculated_funds:
     item["prices"] = item["prices"][-(n_days+1):]
     item["running_scores"] = []
 
-# HER BİR GEÇMİŞ GÜN İÇİN Z-SKOR İLE GERÇEK KGDM-3 HESAPLAMASI
+# HER BİR GEÇMİŞ GÜN İÇİN Z-SKOR İLE GERÇEK KGDM-3 HESAPLAMASI (AUM, Yatırımcı ve MaxDD Entegreli)
 for d in range(1, n_days + 1):
-    day_means, day_sharpes, day_cums = [], [], []
+    day_means, day_sharpes, day_cums, day_aum_chgs, day_inv_chgs, day_maxdds = [], [], [], [], [], []
     for item in calculated_funds:
         slice_ret = item["daily_returns"][:d]
         m_ret = sum(slice_ret) / len(slice_ret)
@@ -467,6 +476,9 @@ for d in range(1, n_days + 1):
         day_means.append(m_ret)
         day_sharpes.append(shp)
         day_cums.append(cum)
+        day_aum_chgs.append(item["aum_change"])
+        day_inv_chgs.append(item["inv_change"])
+        day_maxdds.append(item["max_dd"])
         
         if d == n_days:
             item["mean_return"] = m_ret
@@ -477,30 +489,27 @@ for d in range(1, n_days + 1):
     z_m = zscore(day_means) if len(calculated_funds) > 1 else [0.0 for _ in calculated_funds]
     z_s = zscore(day_sharpes) if len(calculated_funds) > 1 else [0.0 for _ in calculated_funds]
     z_c = zscore(day_cums) if len(calculated_funds) > 1 else [0.0 for _ in calculated_funds]
+    z_a = zscore(day_aum_chgs) if len(calculated_funds) > 1 else [0.0 for _ in calculated_funds]
+    z_i = zscore(day_inv_chgs) if len(calculated_funds) > 1 else [0.0 for _ in calculated_funds]
+    z_d = zscore(day_maxdds) if len(calculated_funds) > 1 else [0.0 for _ in calculated_funds]
     
     for i, item in enumerate(calculated_funds):
         val = item["valor"]
         v_pen = (val * 0.5) if val is not None else 0.0
-        raw_score = 50 + 15 * z_m[i] + 20 * z_s[i] + 15 * z_c[i] - v_pen
+        # Gelişmiş KGDM-3 Formülü: Getiri(10) + Sharpe(15) + Kümülatif(10) + AUM Değişim(10) + Yatırımcı Değişim(10) - MaxDD Cezası(5*Z) - Valör
+        raw_score = 50 + 10 * z_m[i] + 15 * z_s[i] + 10 * z_c[i] + 10 * z_a[i] + 10 * z_i[i] - 5 * z_d[i] - v_pen
         score = int(round(max(0.0, min(100.0, raw_score))))
         item["running_scores"].append(score)
 
 # SON 3 GÜN SKORLARI, TREND VE KAZANÇ/KAYIP DURUMU ENTEGRASYONU
 for item in calculated_funds:
     scores = item["running_scores"]
-    if len(scores) >= 3:
-        last_3 = scores[-3:]
-    else:
-        last_3 = scores
+    last_3 = scores[-3:] if len(scores) >= 3 else scores
     
-    # Son 3 günün ortalaması nihai skor olarak baz alınır (veya ağırlıklandırılır)
     avg_score_3d = sum(last_3) / len(last_3)
     item["kgdm_skor"] = int(round(avg_score_3d))
-    
-    # Metin gösterimleri
     item["last_3_scores_str"] = " ➔ ".join([str(s) for s in last_3])
     
-    # 3 Günlük Momentum / Kazanç-Kayıp Durumu Tespiti
     recent_returns = item["daily_returns"][-3:] if len(item["daily_returns"]) >= 3 else item["daily_returns"]
     recent_cum_return = sum(recent_returns)
     
@@ -512,7 +521,7 @@ for item in calculated_funds:
         else:
             item["trend_status"] = "➡️ Yatay / Kararsız"
     else:
-            item["trend_status"] = "➡️ Veri Sınırlı"
+        item["trend_status"] = "➡️ Veri Sınırlı"
 
     score = item["kgdm_skor"]
     if score >= 60: item["karar"] = "GÜÇLÜ AL (≥60 Puan)"; item["karar_sira"] = 1
@@ -534,6 +543,9 @@ for item in calculated_funds:
         "Volatilite %": round(item["volatility"], 3),
         "Sharpe": round(item["sharpe_like"], 3), 
         "Kümülatif Getiri %": round(item["cumulative_return"], 3),
+        "AUM Değişim %": round(item["aum_change"], 2),
+        "Yatırımcı Değişim %": round(item["inv_change"], 2),
+        "MaxDD %": round(item["max_dd"], 2),
         "AUM ₺": round(item["aum"], 0) if item["aum"] else 0, 
         "Yatırımcı": item["investors"],
         "Valör": item["valor"] if item["valor"] is not None else "-", 
@@ -552,7 +564,7 @@ def color_cells(value):
 try: styled_df = df_display.style.map(color_cells)
 except AttributeError: styled_df = df_display.style.applymap(color_cells)
 
-st.subheader("📊 KGDM-3 Fon Sonuçları (Son 3 Gün Trend & Skor Analizi)")
+st.subheader("📊 KGDM-3 Fon Sonuçları (Balina & Risk Entegreli)")
 st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
 strong_buy_count = sum(item["kgdm_skor"] >= 60 for item in calculated_funds)
@@ -578,7 +590,7 @@ if source_errors:
         st.dataframe(pd.DataFrame(source_errors), use_container_width=True, hide_index=True)
 
 output = create_excel_output(wb=wb, ws_list=ws_list, calculated_funds=calculated_funds, n_days=n_days)
-st.success(f"✅ Analiz tamamlandı. {len(calculated_funds)} fon için son 3 günlük skor trendleri ve kazanç/kayıp durumları modele yansıtıldı.")
+st.success(f"✅ Analiz tamamlandı. {len(calculated_funds)} fon için AUM değişimleri, yatırımcı hareketleri ve MaxDD risk cezaları modele başarıyla yansıtıldı.")
 
 st.download_button(label="📥 Güncellenmiş Excel'i İndir", data=output, file_name="fonlar_guncel.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 st.caption(f"KGDM-3 Fon Analiz Otomasyonu v{APP_VERSION} | Analiz tarihi: {today.strftime('%d.%m.%Y')}")
