@@ -5,6 +5,7 @@ from typing import Optional
 
 import openpyxl
 import pandas as pd
+requests = pd.read_csv # (çakışma önleyici)
 import requests
 import streamlit as st
 
@@ -15,14 +16,17 @@ from openpyxl.utils import get_column_letter
 st.set_page_config(page_title="KGDM-3 Fon Analiz Otomasyonu", page_icon="📊", layout="wide")
 
 st.title("📊 KGDM-3 Fon Analiz ve Excel Otomasyonu")
-st.caption("10.000 Yatırımcı Alt Sınır Filtresi | Dengelenmiş Z-Skor, MaxDD Kalkanı ve Son 5 Günlük Trend Analizi.")
+st.caption("GitHub Entegrasyonu | 10.000 Yatırımcı Alt Sınırı, Dengelenmiş Z-Skor ve Son 5 Günlük Trend Analizi.")
 
 FUND_KINDS = ("YAT", "EMK", "BYF")
 LOOKBACK_CALENDAR_DAYS = 35
 TARGET_TRADING_DAYS = 10
 MIN_INVESTOR_COUNT = 10000  # En az yatırımcı sayısı sınırı
 HTTP_TIMEOUT = 8
-APP_VERSION = "4.8.0"
+APP_VERSION = "4.9.0"
+
+# GITHUB ÜZERİNDEKİ EXCEL DOSYANIZIN RAW LİNKİNİ BURAYA YAPIŞTIRIN:
+GITHUB_EXCEL_URL = "https://github.com/tlgssk/kgdm3-fon-analiz/blob/main/Tum_Fonlar_2026-08-14.xlsx"
 
 COLOR_NAVY = "1F4E79"
 COLOR_GREEN = "008000"
@@ -357,19 +361,43 @@ def create_excel_output(wb, ws_list, calculated_funds, n_days) -> io.BytesIO:
     return output
 
 # ---------------------------------------------------------------------------
-# ANA UYGULAMA
+# ANA UYGULAMA (GİRİŞ SEÇENEKLERİ)
 # ---------------------------------------------------------------------------
 
-uploaded_file = st.file_uploader("Excel Dosyanızı Yükleyin (fonlar.xlsx):", type=["xlsx"])
+st.subheader("📂 Veri Kaynağı Seçimi")
+col_upload, col_github = st.columns(2)
 
-if uploaded_file is None:
-    st.info("Başlamak için Fon_Listesi sayfasını içeren Excel dosyanızı yükleyin.")
+wb = None
+source_mode = None
+
+with col_upload:
+    uploaded_file = st.file_uploader("Bilgisayardan Excel Yükle (fonlar.xlsx):", type=["xlsx"])
+    if uploaded_file is not None:
+        try:
+            wb = openpyxl.load_workbook(uploaded_file)
+            source_mode = "upload"
+        except Exception as exc:
+            st.error(f"Excel dosyası okunamadı: {exc}")
+
+with col_github:
+    st.write("Veya GitHub'daki listeyi kullanın:")
+    if st.button("🚀 GitHub'dan Otomatik Çek ve Analiz Et", use_container_width=True):
+        try:
+            gh_response = requests.get(GITHUB_EXCEL_URL, timeout=HTTP_TIMEOUT)
+            gh_response.raise_for_status()
+            wb = openpyxl.load_workbook(io.BytesIO(gh_response.content))
+            source_mode = "github"
+            st.success("✅ GitHub'daki Excel dosyası başarıyla indirildi!")
+        except Exception as exc:
+            st.error(f"GitHub'dan dosya çekilemedi: {exc}")
+
+if wb is None:
+    st.info("Başlamak için yukarıdan Excel dosyası yükleyin ya da GitHub butonuna basın.")
     st.stop()
 
-try: wb = openpyxl.load_workbook(uploaded_file)
-except Exception as exc: st.error(f"Excel dosyası okunamadı: {exc}"); st.stop()
-
-if "Fon_Listesi" not in wb.sheetnames: st.error("Yüklenen dosyada 'Fon_Listesi' sayfası bulunamadı!"); st.stop()
+if "Fon_Listesi" not in wb.sheetnames: 
+    st.error("Yüklenen veya indirilen dosyada 'Fon_Listesi' sayfası bulunamadı!")
+    st.stop()
 
 ws_list = wb["Fon_Listesi"]
 requested_codes = []
@@ -411,6 +439,11 @@ available_codes = set(universe["code"].astype(str).str.upper().unique()) if not 
 found_in_tefas = [code for code in requested_codes if code in available_codes]
 missing_from_tefas = [code for code in requested_codes if code not in available_codes]
 
+col1, col2, col3 = st.columns(3)
+with col1: st.metric("TEFAS'ta Bulunan", len(found_in_tefas))
+with col2: st.metric("Yedek Kaynağa Kalan", len(missing_from_tefas))
+with col3: st.metric("TEFAS Kayıt Sayısı", len(universe))
+
 calculated_funds = []
 source_errors = []
 investor_filtered_out = []
@@ -439,7 +472,6 @@ for index, code in enumerate(requested_codes, start=1):
         progress.progress(index / total_funds, text=f"{code} işlenemedi...")
         continue
         
-    # YATIRIMCI SAYISI 10.000'DEN AZ OLANLARI ELEME KONTROLÜ
     if metrics["investors"] < MIN_INVESTOR_COUNT and data_source == "TEFAS":
         investor_filtered_out.append({"code": code, "investors": metrics["investors"], "reason": f"Yatırımcı sayısı barajın altında (< {MIN_INVESTOR_COUNT:,})".replace(",", ".")})
         progress.progress(index / total_funds, text=f"{code} yatırımcı sayısı nedeniyle elendi...")
@@ -578,7 +610,7 @@ def color_cells(value):
 try: styled_df = df_display.style.map(color_cells)
 except AttributeError: styled_df = df_display.style.applymap(color_cells)
 
-st.subheader("📊 KGDM-3 Fon Sonuçları (10.000 Yatırımcı Filtreli)")
+st.subheader("📊 KGDM-3 Fon Sonuçları (GitHub Entegreli)")
 st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
 strong_buy_count = sum(item["kgdm_skor"] >= 60 for item in calculated_funds)
@@ -608,7 +640,7 @@ if source_errors:
         st.dataframe(pd.DataFrame(source_errors), use_container_width=True, hide_index=True)
 
 output = create_excel_output(wb=wb, ws_list=ws_list, calculated_funds=calculated_funds, n_days=n_days)
-st.success(f"✅ Analiz tamamlandı. Yatırımcı sayısı 10.000'in altında olan fonlar sistem tarafından filtrelenerek dışarıda bırakıldı.")
+st.success(f"✅ Analiz tamamlandı. ({source_mode.upper()} kaynağından okundu).")
 
 st.download_button(label="📥 Güncellenmiş Excel'i İndir", data=output, file_name="fonlar_guncel.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 st.caption(f"KGDM-3 Fon Analiz Otomasyonu v{APP_VERSION} | Analiz tarihi: {today.strftime('%d.%m.%Y')}")
