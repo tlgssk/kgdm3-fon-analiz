@@ -21,7 +21,7 @@ FUND_KINDS = ("YAT", "EMK", "BYF")
 LOOKBACK_CALENDAR_DAYS = 35
 TARGET_TRADING_DAYS = 10
 HTTP_TIMEOUT = 8
-APP_VERSION = "4.0.0"
+APP_VERSION = "4.1.0"
 
 COLOR_NAVY = "1F4E79"
 COLOR_GREEN = "008000"
@@ -344,7 +344,6 @@ def create_excel_output(wb, ws_list, calculated_funds, n_days) -> io.BytesIO:
     wb.save(output)
     output.seek(0)
     return output
-
 
 # ---------------------------------------------------------------------------
 # ANA UYGULAMA
