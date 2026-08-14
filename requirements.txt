@@ -6,3 +6,4 @@ pytefas
 requests
 cloudscraper
 tefas
+webdriver_manager
