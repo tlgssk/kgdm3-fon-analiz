@@ -16,17 +16,17 @@ from openpyxl.utils import get_column_letter
 st.set_page_config(page_title="KGDM-3 Fon Analiz Otomasyonu", page_icon="📊", layout="wide")
 
 st.title("📊 KGDM-3 Fon Analiz ve Excel Otomasyonu")
-st.caption("Varlık Dağılımı & Odak Hisse Yoğunlaşma Analizi | GitHub Entegrasyonu, 10.000 Yatırımcı Alt Sınırı ve Dengelenmiş Z-Skor.")
+st.caption("Varlık Dağılımı & Odak Hisse Yoğunlaşma Analizi | GitHub Entegrasyonu, 5.000 Yatırımcı Alt Sınırı ve Dengelenmiş Z-Skor.")
 
 FUND_KINDS = ("YAT", "EMK", "BYF")
 LOOKBACK_CALENDAR_DAYS = 35
 TARGET_TRADING_DAYS = 10
-MIN_INVESTOR_COUNT = 10000
+MIN_INVESTOR_COUNT = 5000
 HTTP_TIMEOUT = 8
 APP_VERSION = "5.0.0"
 
 # GITHUB ÜZERİNDEKİ EXCEL DOSYANIZIN RAW LİNKİ:
-GITHUB_EXCEL_URL = "https://raw.githubusercontent.com/KULLANICI_ADINIZ/REPO_ADINIZ/main/fonlar.xlsx"
+GITHUB_EXCEL_URL = "https://github.com/tlgssk/kgdm3-fon-analiz/raw/refs/heads/main/Menkul_Kiymet_Yatirim_Fonlari_EXCEL_Tum_Veri_2026-08-14.xlsx"
 
 COLOR_NAVY = "1F4E79"
 COLOR_GREEN = "008000"
