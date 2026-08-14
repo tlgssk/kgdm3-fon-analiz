@@ -2,7 +2,6 @@ import datetime as dt
 import io
 import math
 import re
-import json
 import urllib3
 from typing import Optional, List, Tuple
 
@@ -15,16 +14,36 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 # ============================================================
-# GÜVENLİK DUVARI BYPASS & ÇEREZ YÖNETİMİ
+# CLOUDFLARE / ANTI-BOT BYPASS MOTORU (V13)
 # ============================================================
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+try:
+    import cloudscraper
+    # Gerçek bir Chrome tarayıcısı taklidi yapan, Javascript şifrelerini çözen motor
+    req_session = cloudscraper.create_scraper(
+        browser={
+            'browser': 'chrome',
+            'platform': 'windows',
+            'desktop': True
+        }
+    )
+    HAS_CLOUDSCRAPER = True
+except ImportError:
+    req_session = requests.Session()
+    req_session.verify = False
+    req_session.headers.update({"User-Agent": "Mozilla/5.0"})
+    HAS_CLOUDSCRAPER = False
 
 # ============================================================
 # SAYFA AYARLARI & SABİTLER
 # ============================================================
-st.set_page_config(page_title="Multi-Vade Fon Analizi V12", page_icon="📈", layout="wide")
-st.title("📈 Multi-Vade Fon Analizi V12")
-st.caption("Kurumsal API Bypass Motoru (İş Yatırım Cookie + Dinamik PyTefas) + Kusursuz Z-Skor")
+st.set_page_config(page_title="Multi-Vade Fon Analizi V13", page_icon="📈", layout="wide")
+st.title("📈 Multi-Vade Fon Analizi V13")
+st.caption("Cloudscraper Bypass Motoru + Kesintisiz Veri + Kusursuz Z-Skor")
+
+if not HAS_CLOUDSCRAPER:
+    st.error("🚨 `cloudscraper` kütüphanesi bulunamadı! 401/403 hataları almaya devam edeceksiniz. Lütfen terminale `pip install cloudscraper` yazarak yükleyin.")
 
 LOOKBACK_CALENDAR_DAYS = 400
 HTTP_TIMEOUT = 15
@@ -61,8 +80,7 @@ def parse_number(value) -> Optional[float]:
 
 def normalize_fund_code(value) -> str:
     if value is None: return ""
-    code = str(value).strip().upper()
-    return code[:-2] if code.endswith(".0") else code
+    return str(value).strip().upper()[:3]  # Fazlalık boşlukları temizler ve garanti 3 hane alır
 
 def safe_float(value, default=0.0):
     try:
@@ -84,39 +102,96 @@ def infer_category(title: str) -> str:
     return "Diğer"
 
 # ============================================================
-# KURUMSAL API BYPASS MOTORLARI (V12)
+# CLOUDSCRAPER VERİ MOTORLARI (V13)
 # ============================================================
 def fetch_fund_metadata(code: str) -> dict:
     url = f"https://www.tefas.gov.tr/FonAnaliz.aspx?FonKod={code.upper()}"
     meta = {"aum": 0.0, "investors": 0.0, "title": "", "category": ""}
     try:
-        res = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, verify=False, timeout=HTTP_TIMEOUT)
+        res = req_session.get(url, timeout=HTTP_TIMEOUT)
         if res.status_code == 200:
-            m_title = re.search(r'id="MainContent_FormViewMainIndicators_LabelFund"?[^>]*>([^<]+)</span>', res.text)
+            html = res.text
+            m_title = re.search(r'id="MainContent_FormViewMainIndicators_LabelFund"?[^>]*>([^<]+)</span>', html)
             if m_title: 
                 meta["title"] = m_title.group(1).strip()
                 meta["category"] = infer_category(meta["title"])
-            m_aum = re.search(r'id="MainContent_FormViewMainIndicators_LabelPortfolioValue"?[^>]*>([^<]+)</span>', res.text)
+            m_aum = re.search(r'id="MainContent_FormViewMainIndicators_LabelPortfolioValue"?[^>]*>([^<]+)</span>', html)
             if m_aum: meta["aum"] = parse_number(m_aum.group(1)) or 0.0
-            m_inv = re.search(r'id="MainContent_FormViewMainIndicators_LabelInvestorCount"?[^>]*>([^<]+)</span>', res.text)
+            m_inv = re.search(r'id="MainContent_FormViewMainIndicators_LabelInvestorCount"?[^>]*>([^<]+)</span>', html)
             if m_inv: meta["investors"] = parse_number(m_inv.group(1)) or 0.0
     except: pass
     return meta
 
+def fetch_tefas_prices(code: str, start_date: dt.date, end_date: dt.date) -> Tuple[Optional[pd.DataFrame], str]:
+    urls = ["https://www.tefas.gov.tr/api/DB/BindHistoryRecord", "https://www.tefas.gov.tr/api/DB/BindHistoryInfo"]
+    for url in urls:
+        for fontip in ["YAT", "EMK", "BYF"]:
+            data = {"fontip": fontip, "sfontur": "", "fonkod": code.upper(), "fongrup": "", "baslangic": start_date.strftime("%d.%m.%Y"), "bitis": end_date.strftime("%d.%m.%Y")}
+            headers = {"Content-Type": "application/x-www-form-urlencoded; charset=UTF-8", "X-Requested-With": "XMLHttpRequest"}
+            try:
+                res = req_session.post(url, data=data, headers=headers, timeout=10)
+                if res.status_code == 200:
+                    data_list = res.json().get("data", [])
+                    if data_list:
+                        rows = [{"date": pd.Timestamp(dt.datetime.fromtimestamp(item["TARIH"] / 1000.0).date()), "price": float(item["FIYAT"])} for item in data_list if item.get("TARIH") and item.get("FIYAT")]
+                        df = pd.DataFrame(rows).dropna()
+                        df = df[df["price"] > 0]
+                        if len(df) >= 2:
+                            return df.sort_values("date").drop_duplicates(subset=["date"], keep="last").tail(MAX_DAYS + 1).reset_index(drop=True), "OK"
+            except: pass
+    return None, "TEFAS API başarısız."
+
+def fetch_isyatirim_series(code: str, start_date: dt.date, end_date: dt.date) -> Tuple[Optional[pd.DataFrame], str]:
+    # Önce ana sayfaya girip Session Cookie al (401 Bypass)
+    try: req_session.get("https://www.isyatirim.com.tr/tr-tr/analiz/fon/Sayfalar/Tarihsel-Fiyat-Bilgileri.aspx", timeout=10)
+    except: pass
+
+    url = "https://www.isyatirim.com.tr/_layouts/15/IsYatirim.Website/Common/Data.aspx/YatirimFonGecmisGetiri"
+    params = {"fonKod": code.upper(), "baslangic": start_date.strftime("%d-%m-%Y"), "bitis": end_date.strftime("%d-%m-%Y")}
+    try:
+        res = req_session.get(url, params=params, timeout=HTTP_TIMEOUT)
+        if res.status_code == 200:
+            values = res.json().get("value")
+            if values:
+                df = pd.DataFrame(values)
+                df["date"] = pd.to_datetime(df.get("Tarih"), dayfirst=True, errors="coerce")
+                df["price"] = df.get("Fiyat").apply(parse_number)
+                df = df.dropna(subset=["date", "price"])
+                df = df[df["price"] > 0]
+                if len(df) >= 2:
+                    return df.sort_values("date").drop_duplicates(subset=["date"], keep="last").tail(MAX_DAYS + 1).reset_index(drop=True), "OK"
+        return None, f"İşYatırım boş/hatalı yanıt ({res.status_code})"
+    except Exception as e: return None, f"İşYatırım Hatası: {str(e)}"
+
+def fetch_fintables_series(code: str) -> Tuple[Optional[pd.DataFrame], str]:
+    # Fintables Cloudflare korumasını cloudscraper ile aşar
+    urls = [f"https://fintables.com/fonlar/{code.lower()}", f"https://fintables.com/fon/{code.lower()}"]
+    for url in urls:
+        try:
+            res = req_session.get(url, timeout=HTTP_TIMEOUT)
+            if res.status_code == 200:
+                pattern = re.compile(r'"date"\s*:\s*"(\d{4}-\d{2}-\d{2})"[^{}]{0,200}?"price"\s*:\s*([0-9]+(?:\.[0-9]+)?)', re.IGNORECASE)
+                matches = pattern.findall(res.text)
+                if matches:
+                    rows = [{"date": pd.to_datetime(d), "price": parse_number(p)} for d, p in matches]
+                    df = pd.DataFrame(rows).dropna()
+                    df = df[df["price"] > 0]
+                    if len(df) >= 2:
+                        return df.sort_values("date").drop_duplicates(subset=["date"], keep="last").tail(MAX_DAYS + 1).reset_index(drop=True), "OK"
+        except: pass
+    return None, "Fintables API başarısız (403/Cloudflare)."
+
 def fetch_pytefas_single(code: str, start_date: dt.date, end_date: dt.date) -> Tuple[Optional[pd.DataFrame], str]:
-    """Parametre değişikliklerine duyarlı PyTefas bağlantısı"""
     try:
         from pytefas import Crawler
         c = Crawler(timeout=10, max_retry=2)
         df = None
-        # PyTefas'ın olası tüm parametre adlarını sırayla dener
         for param in ["fonkod", "fund", "name", "fund_code"]:
             try:
                 kwargs = {"start": start_date.strftime("%Y-%m-%d"), "end": end_date.strftime("%Y-%m-%d"), param: code.upper(), "columns": ['date', 'price']}
                 df = c.fetch(**kwargs)
                 break
-            except TypeError: continue
-            except Exception: break
+            except: continue
                 
         if df is not None and not df.empty:
             df['date'] = pd.to_datetime(df['date'], errors='coerce')
@@ -125,82 +200,11 @@ def fetch_pytefas_single(code: str, start_date: dt.date, end_date: dt.date) -> T
             df = df[df['price'] > 0]
             if len(df) >= 2:
                 return df.sort_values("date").drop_duplicates(subset=["date"], keep="last").tail(MAX_DAYS + 1).reset_index(drop=True), "OK"
-        return None, "PyTefas veri bulamadı veya kütüphane uyumsuz."
+        return None, "PyTefas veri bulamadı."
     except Exception as e: return None, f"PyTefas Hatası: {str(e)}"
 
-def fetch_isyatirim_series(code: str, start_date: dt.date, end_date: dt.date) -> Tuple[Optional[pd.DataFrame], str]:
-    """İş Yatırım 401 Cookie Engelini Aşan Özel Oturum Katmanı"""
-    session = requests.Session()
-    session.verify = False
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
-        "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
-    })
-    
-    main_url = "https://www.isyatirim.com.tr/tr-tr/analiz/fon/Sayfalar/Tarihsel-Fiyat-Bilgileri.aspx"
-    api_url = "https://www.isyatirim.com.tr/_layouts/15/IsYatirim.Website/Common/Data.aspx/YatirimFonGecmisGetiri"
-    params = {"fonKod": code.upper(), "baslangic": start_date.strftime("%d-%m-%Y"), "bitis": end_date.strftime("%d-%m-%Y")}
-    
-    try:
-        # 1. Adım: Ana sayfaya bağlanıp güvenlik duvarı çerezlerini (Cookie) al
-        session.get(main_url, timeout=10)
-        
-        # 2. Adım: Ajax isteği taklidi yaparak veriyi çek
-        session.headers.update({
-            "X-Requested-With": "XMLHttpRequest",
-            "Referer": main_url,
-            "Accept": "application/json, text/javascript, */*; q=0.01"
-        })
-        
-        res = session.get(api_url, params=params, timeout=HTTP_TIMEOUT)
-        res.raise_for_status()
-        
-        values = res.json().get("value")
-        if not values: return None, "İş Yatırım API boş veri döndürdü."
-        
-        df = pd.DataFrame(values)
-        if "Tarih" not in df.columns or "Fiyat" not in df.columns: return None, "Format hatalı."
-        
-        df["date"] = pd.to_datetime(df.get("Tarih"), dayfirst=True, errors="coerce")
-        df["price"] = df.get("Fiyat").apply(parse_number)
-        df = df.dropna(subset=["date", "price"])
-        df = df[df["price"] > 0]
-        if len(df) < 2: return None, "Yetersiz fiyat verisi."
-        
-        return df.sort_values("date").drop_duplicates(subset=["date"], keep="last").tail(MAX_DAYS + 1).reset_index(drop=True), "OK"
-    except Exception as e: return None, f"İşYatırım Hatası: {str(e)}"
-
-def fetch_fintables_series(code: str) -> Tuple[Optional[pd.DataFrame], str]:
-    """Next.js Yapısını Çözen Derin Fintables Tarayıcısı"""
-    url = f"https://fintables.com/fonlar/{code.lower()}"
-    try:
-        res = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, verify=False, timeout=HTTP_TIMEOUT)
-        res.raise_for_status()
-        
-        # Olası tüm veri dizilimlerini tarar
-        matches = re.findall(r'"date"\s*:\s*"(\d{4}-\d{2}-\d{2})"[^{}]*?"price"\s*:\s*([0-9]+(?:\.[0-9]+)?)', res.text, re.IGNORECASE)
-        if not matches:
-            matches2 = re.findall(r'"price"\s*:\s*([0-9]+(?:\.[0-9]+)?)[^{}]*?"date"\s*:\s*"(\d{4}-\d{2}-\d{2})"', res.text, re.IGNORECASE)
-            matches = [(d, p) for p, d in matches2]
-            
-        if not matches:
-            # Json verisi içindeki Next.js scriptini kır
-            json_match = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.+?)</script>', res.text)
-            if json_match:
-                matches = re.findall(r'"date"\s*:\s*"(\d{4}-\d{2}-\d{2})"[^{}]*?"price"\s*:\s*([0-9]+(?:\.[0-9]+)?)', json_match.group(1), re.IGNORECASE)
-        
-        if not matches: return None, "Fintables yapısal değişiklik yapmış."
-        
-        rows = [{"date": pd.to_datetime(d), "price": parse_number(p)} for d, p in matches]
-        df = pd.DataFrame(rows).dropna()
-        df = df[df["price"] > 0]
-        if len(df) < 2: return None, "Yeterli fiyat verisi yok."
-        
-        return df.sort_values("date").drop_duplicates(subset=["date"], keep="last").tail(MAX_DAYS + 1).reset_index(drop=True), "OK"
-    except Exception as e: return None, f"Fintables Hatası: {str(e)}"
-
 # ============================================================
-# METRİKLER (MDD, SORTINO)
+# METRİKLER VE MATEMATİKSEL İŞLEMLER
 # ============================================================
 def compute_max_drawdown(prices: List[float]) -> float:
     if not prices or len(prices) < 2: return 0.0
@@ -256,7 +260,7 @@ def calculate_period_scores(funds: List[dict], days: int, daily_rf: float, use_c
         item[f"mdd_{days}"] = compute_max_drawdown(s_prices)
         item[f"sortino_{days}"] = compute_sortino(s_ret, daily_rf=daily_rf)
 
-    valid_idx = [i for i, f in enumerate(funds) if not f.get("filtered_out") and all(f.get(f"{m}_{days}") is not None for m in ["cum", "shp", "sortino", "mdd"])]
+    valid_idx = [i for i, f in enumerate(funds) if not f.get("filtered_out", False) and all(f.get(f"{m}_{days}") is not None for m in ["cum", "shp", "sortino", "mdd"])]
     if not valid_idx:
         for f in funds: f[f"score_{days}"], f[f"karar_{days}"] = None, "FİLTRE DIŞI" if f.get("filtered_out") else "YETERSİZ VERİ"
         return
@@ -320,10 +324,8 @@ def calculate_period_scores(funds: List[dict], days: int, daily_rf: float, use_c
 @st.cache_data(show_spinner=False, ttl=60 * 30)
 def fetch_yahoo_series(symbol: str, start_date: dt.date, end_date: dt.date) -> Tuple[Optional[pd.DataFrame], str]:
     try:
-        session = requests.Session()
-        session.verify = False
         p1, p2 = int(dt.datetime.combine(start_date, dt.time.min).timestamp()), int(dt.datetime.combine(end_date + dt.timedelta(days=1), dt.time.min).timestamp())
-        res = session.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}", params={"period1": p1, "period2": p2, "interval": "1d", "events": "history", "includeAdjustedClose": "true"}, headers={"User-Agent": "Mozilla/5.0"}, timeout=HTTP_TIMEOUT)
+        res = req_session.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}", params={"period1": p1, "period2": p2, "interval": "1d", "events": "history", "includeAdjustedClose": "true"}, timeout=HTTP_TIMEOUT)
         res.raise_for_status()
         result = res.json().get("chart", {}).get("result", [{}])[0]
         t_stamps, closes = result.get("timestamp"), result.get("indicators", {}).get("quote", [{}])[0].get("close")
@@ -422,9 +424,9 @@ req_codes = list(dict.fromkeys(req_codes))
 today, start_date = dt.date.today(), dt.date.today() - dt.timedelta(days=LOOKBACK_CALENDAR_DAYS)
 
 # ============================================================
-# ANA VERİ TOPLAMA BLOĞU (V12)
+# ANA VERİ TOPLAMA BLOĞU (V13)
 # ============================================================
-with st.spinner("Güvenlik Duvarı Bypass Motoru çalışıyor..."):
+with st.spinner("Cloudscraper Anti-Bot Motoru Çalışıyor..."):
     calc_funds, fail_codes, error_logs = [], [], []
     bar, st_text = st.progress(0), st.empty()
     tot = len(req_codes)
@@ -434,21 +436,27 @@ with st.spinner("Güvenlik Duvarı Bypass Motoru çalışıyor..."):
         meta = fetch_fund_metadata(code)
         series, src, errs = None, "Bulunamadı", []
         
-        # 1. İş Yatırım (Cookie Koruması Aşımı ile)
+        # 1. İş Yatırım (Cloudscraper Cookie Bypass)
         series, err = fetch_isyatirim_series(code, start_date, today)
         if series is not None: src = "İş Yatırım"
         else: errs.append(err)
 
-        # 2. PyTefas (Dinamik Parametre)
+        # 2. TEFAS API (Yeni Uç Nokta)
         if series is None:
-            series, err = fetch_pytefas_single(code, start_date, today)
-            if series is not None: src = "PyTefas"
+            series, err = fetch_tefas_prices(code, start_date, today)
+            if series is not None: src = "TEFAS"
             else: errs.append(err)
             
-        # 3. Fintables (Derin HTML Regex)
+        # 3. Fintables (Cloudscraper Regex)
         if series is None:
             series, err = fetch_fintables_series(code)
             if series is not None: src = "Fintables"
+            else: errs.append(err)
+            
+        # 4. PyTefas (Fallback)
+        if series is None:
+            series, err = fetch_pytefas_single(code, start_date, today)
+            if series is not None: src = "PyTefas"
             else: errs.append(err)
 
         if series is not None:
@@ -548,7 +556,7 @@ out.seek(0)
 # ============================================================
 # SONUÇ EKRANI
 # ============================================================
-st.download_button("📥 V12 Excel Çıktısını İndir", data=out, file_name="fon_vade_analizi_V12.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+st.download_button("📥 V13 Excel Çıktısını İndir", data=out, file_name="fon_vade_analizi_V13.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 st.subheader("📊 Fon Sıralaması Önizleme")
 df_p = pd.DataFrame([{"Fon": f["code"], "Kategori": f.get("category", "-"), "1H": fmt(f.get("score_5")), "1A": fmt(f.get("score_21")), "3A": fmt(f.get("score_63")), "1Y": fmt(f.get("score_252")), "Nihai Skor": fmt(f.get("final_score")), "Nihai Karar": f.get("final_decision", "-"), "Güven": f.get("confidence", "-"), "Kaynak": f.get("source", "-")} for f in calc_funds])
 st.dataframe(df_p, use_container_width=True, hide_index=True)
