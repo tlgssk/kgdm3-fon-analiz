@@ -15,13 +15,13 @@ from openpyxl.utils import get_column_letter
 st.set_page_config(page_title="KGDM-3 Fon Analiz Otomasyonu", page_icon="📊", layout="wide")
 
 st.title("📊 KGDM-3 Fon Analiz ve Excel Otomasyonu")
-st.caption("Veri şelalesi, AUM/Yatırımcı değişimi (balina takibi), MaxDD risk cezası ve son 3 günlük trend analizi ile tam kapsamlı skorlama.")
+st.caption("Veri şelalesi, AUM/Yatırımcı değişimi (balina takibi), MaxDD risk cezası ve netleştirilmiş karar mantığı ile güncellenmiş analiz.")
 
 FUND_KINDS = ("YAT", "EMK", "BYF")
 LOOKBACK_CALENDAR_DAYS = 35
 TARGET_TRADING_DAYS = 10
 HTTP_TIMEOUT = 8
-APP_VERSION = "4.3.0"
+APP_VERSION = "4.4.0"
 
 COLOR_NAVY = "1F4E79"
 COLOR_GREEN = "008000"
@@ -209,7 +209,6 @@ def compute_fund_metrics(series: Optional[pd.DataFrame]) -> Optional[dict]:
             
     if not daily_returns: return None
     
-    # MaxDD (Maksimum Düşüş) Hesaplama
     peak = prices[0]
     max_dd = 0.0
     for price in prices:
@@ -219,7 +218,6 @@ def compute_fund_metrics(series: Optional[pd.DataFrame]) -> Optional[dict]:
         if dd < max_dd:
             max_dd = dd
             
-    # AUM ve Yatırımcı Değişim Hızı (%)
     aum_change = ((aums[-1] - aums[0]) / aums[0] * 100) if aums[0] > 0 else 0.0
     inv_change = ((investors[-1] - investors[0]) / investors[0] * 100) if investors[0] > 0 else 0.0
 
@@ -321,8 +319,8 @@ def create_excel_output(wb, ws_list, calculated_funds, n_days) -> io.BytesIO:
     yellow_font = Font(bold=True, color=COLOR_YELLOW)
     
     for row_number in range(2, ws_scores.max_row + 1):
-        ws_scores.cell(row=row_number, column=14).number_format = '#,##0.00 "₺"' # AUM
-        ws_scores.cell(row=row_number, column=15).number_format = '#,##0' # Yatırımcı
+        ws_scores.cell(row=row_number, column=14).number_format = '#,##0.00 "₺"' 
+        ws_scores.cell(row=row_number, column=15).number_format = '#,##0' 
         ws_scores.cell(row=row_number, column=COL_VALOR).number_format = '0'
         ws_scores.cell(row=row_number, column=COL_SCORE).number_format = '0'
         
@@ -454,7 +452,6 @@ if not calculated_funds:
     if source_errors: st.dataframe(pd.DataFrame(source_errors), use_container_width=True)
     st.stop()
 
-# Ortak gün sayısına hizalama
 n_days = min(item["n_days"] for item in calculated_funds)
 for item in calculated_funds:
     item["dates"] = item["dates"][-n_days:]
@@ -462,7 +459,6 @@ for item in calculated_funds:
     item["prices"] = item["prices"][-(n_days+1):]
     item["running_scores"] = []
 
-# HER BİR GEÇMİŞ GÜN İÇİN Z-SKOR İLE GERÇEK KGDM-3 HESAPLAMASI (AUM, Yatırımcı ve MaxDD Entegreli)
 for d in range(1, n_days + 1):
     day_means, day_sharpes, day_cums, day_aum_chgs, day_inv_chgs, day_maxdds = [], [], [], [], [], []
     for item in calculated_funds:
@@ -496,12 +492,11 @@ for d in range(1, n_days + 1):
     for i, item in enumerate(calculated_funds):
         val = item["valor"]
         v_pen = (val * 0.5) if val is not None else 0.0
-        # Gelişmiş KGDM-3 Formülü: Getiri(10) + Sharpe(15) + Kümülatif(10) + AUM Değişim(10) + Yatırımcı Değişim(10) - MaxDD Cezası(5*Z) - Valör
         raw_score = 50 + 10 * z_m[i] + 15 * z_s[i] + 10 * z_c[i] + 10 * z_a[i] + 10 * z_i[i] - 5 * z_d[i] - v_pen
         score = int(round(max(0.0, min(100.0, raw_score))))
         item["running_scores"].append(score)
 
-# SON 3 GÜN SKORLARI, TREND VE KAZANÇ/KAYIP DURUMU ENTEGRASYONU
+# NETLEŞTİRİLMİŞ KARAR VE TREND MANTIĞI
 for item in calculated_funds:
     scores = item["running_scores"]
     last_3 = scores[-3:] if len(scores) >= 3 else scores
@@ -524,10 +519,23 @@ for item in calculated_funds:
         item["trend_status"] = "➡️ Veri Sınırlı"
 
     score = item["kgdm_skor"]
-    if score >= 60: item["karar"] = "GÜÇLÜ AL (≥60 Puan)"; item["karar_sira"] = 1
-    elif score >= 40: item["karar"] = "ASIL LİSTE (40-59 Puan)"; item["karar_sira"] = 2
-    elif score >= 25: item["karar"] = "NÖTR / İZLEME (25-39 Puan)"; item["karar_sira"] = 3
-    else: item["karar"] = "ACİL SAT (<25 Puan)"; item["karar_sira"] = 4
+    
+    # Kafa karışıklığını gidermek için netleştirilmiş karar etiketleri
+    if score >= 60: 
+        item["karar"] = "GÜÇLÜ AL (≥60 Puan)"
+        item["karar_sira"] = 1
+    elif score >= 40: 
+        item["karar"] = "ASIL LİSTE (40-59 Puan)"
+        item["karar_sira"] = 2
+    elif score >= 25: 
+        item["karar"] = "NÖTR / İZLEME (25-39 Puan)"
+        item["karar_sira"] = 3
+    else: 
+        if "Yükselişte" in item["trend_status"]:
+            item["karar"] = "⚠️ Toparlanma Çabasında (Sat Sinyali Devam Ediyor)"
+        else:
+            item["karar"] = "ACİL SAT (<25 Puan)"
+        item["karar_sira"] = 4
 
 calculated_funds.sort(key=lambda item: (item["karar_sira"], -item["kgdm_skor"], -item["cumulative_return"]))
 
@@ -538,7 +546,7 @@ for item in calculated_funds:
         "KGDM-3 (Ort3)": item["kgdm_skor"], 
         "Son 3 Gün Skorlar": item["last_3_scores_str"],
         "3 Günlük Trend": item["trend_status"],
-        "Karar": item["karar"],
+        "Model Kararı": item["karar"],
         "Ort. Getiri %": round(item["mean_return"], 3), 
         "Volatilite %": round(item["volatility"], 3),
         "Sharpe": round(item["sharpe_like"], 3), 
@@ -558,13 +566,13 @@ def color_cells(value):
     text = str(value)
     if "GÜÇLÜ AL" in text or "ASIL LİSTE" in text or "Yükselişte" in text: return "color: #008000; font-weight: bold;"
     if "NÖTR" in text or "Yatay" in text: return "color: #B8860B; font-weight: bold;"
-    if "ACİL SAT" in text or "Düşüşte" in text: return "color: #FF0000; font-weight: bold;"
+    if "ACİL SAT" in text or "Toparlanma Çabasında" in text: return "color: #FF0000; font-weight: bold;"
     return ""
 
 try: styled_df = df_display.style.map(color_cells)
 except AttributeError: styled_df = df_display.style.applymap(color_cells)
 
-st.subheader("📊 KGDM-3 Fon Sonuçları (Balina & Risk Entegreli)")
+st.subheader("📊 KGDM-3 Fon Sonuçları (Netleştirilmiş Karar Matrisi)")
 st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
 strong_buy_count = sum(item["kgdm_skor"] >= 60 for item in calculated_funds)
@@ -590,7 +598,7 @@ if source_errors:
         st.dataframe(pd.DataFrame(source_errors), use_container_width=True, hide_index=True)
 
 output = create_excel_output(wb=wb, ws_list=ws_list, calculated_funds=calculated_funds, n_days=n_days)
-st.success(f"✅ Analiz tamamlandı. {len(calculated_funds)} fon için AUM değişimleri, yatırımcı hareketleri ve MaxDD risk cezaları modele başarıyla yansıtıldı.")
+st.success(f"✅ Analiz tamamlandı. Fonların toparlanma eğiliminde olup düşük skorla sat bölgesinde kaldığı durumlar netleştirildi.")
 
 st.download_button(label="📥 Güncellenmiş Excel'i İndir", data=output, file_name="fonlar_guncel.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 st.caption(f"KGDM-3 Fon Analiz Otomasyonu v{APP_VERSION} | Analiz tarihi: {today.strftime('%d.%m.%Y')}")
