@@ -1,38 +1,71 @@
 import datetime as dt
+import io
 import math
+import requests
 import streamlit as st
-import pandas as pd
-from playwright.sync_api import sync_playwright
-import re
+import openpyxl
+from openpyxl.utils import get_column_letter
 
 # ============================================================
-# V17: TARAYICI SİMÜLASYONU MOTORU
+# V18: AKILLI VERİ KIRPMA VE HATA YÖNETİMİ
 # ============================================================
-def fetch_data_via_browser(code: str, start_date: dt.date, end_date: dt.date):
-    """Gerçek tarayıcı ile sayfayı yükler ve veriyi yakalar."""
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36")
-        page = context.new_page()
-        
-        # TEFAS Analiz Sayfası
-        url = f"https://www.tefas.gov.tr/FonAnaliz.aspx?FonKod={code.upper()}"
-        page.goto(url, wait_until="networkidle")
-        
-        # Sayfadaki JavaScript'in veriyi basmasını bekleyelim (5 saniye)
-        page.wait_for_timeout(5000)
-        
-        # Fiyat verilerini JS değişkenlerinden regex ile çek
-        content = page.content()
-        
-        # Metadata (AUM, Yatırımcı) - Basit bir kazıma
-        title = page.inner_text("#MainContent_FormViewMainIndicators_LabelFund") if page.query_selector("#MainContent_FormViewMainIndicators_LabelFund") else code
-        aum = page.inner_text("#MainContent_FormViewMainIndicators_LabelPortfolioValue") if page.query_selector("#MainContent_FormViewMainIndicators_LabelPortfolioValue") else "0"
-        
-        # Fiyat verisi (Tarihsel fiyatlar genelde JS'de "BindHistoryInfo" döner)
-        # Eğer bu yöntemle de veri gelmiyorsa, fon kodu ile manuel sorgulama gerekebilir.
-        browser.close()
-        return title, aum, content
+st.set_page_config(page_title="Multi-Vade Fon Analizi V18", layout="wide")
+st.title("📈 Multi-Vade Fon Analizi V18")
+st.caption("Otomatik Veri Kırpma (3 Ay -> 1 Ay) + İstihbarat API Motoru")
 
-# Not: Playwright ile veriyi çekmek daha yavaş ama %100 garantilidir.
-# Bu motor V17 ile verileri "gözle görülür" hale getirir.
+# Başlangıçta 3 aylık veri ile dene, hata olursa otomatik düşür
+MAX_DAYS_DEFAULT = 90 # 3 Aylık veri
+MAX_DAYS_FALLBACK = 30 # 1 Aylık veri
+
+# TEFAS'ın yeni API endpoint'i
+def get_tefas_price_data(code, days):
+    url = "https://www.tefas.gov.tr/api/DB/BindHistoryInfo"
+    # Sadece son 'days' kadar veri çekiyoruz
+    end = dt.date.today()
+    start = end - dt.timedelta(days=days + 10)
+    
+    headers = {"User-Agent": "Mozilla/5.0", "X-Requested-With": "XMLHttpRequest"}
+    for fontip in ["", "YAT", "EMK", "BYF"]:
+        data = {"fonkod": code.upper(), "baslangic": start.strftime("%d.%m.%Y"), "bitis": end.strftime("%d.%m.%Y"), "fontip": fontip}
+        try:
+            res = requests.post(url, data=data, headers=headers, timeout=10)
+            if res.status_code == 200:
+                data_list = res.json().get("data", [])
+                if data_list:
+                    rows = [{"date": pd.Timestamp(dt.datetime.fromtimestamp(x["TARIH"]/1000).date()), "price": float(x["FIYAT"])} for x in data_list]
+                    df = pd.DataFrame(rows).sort_values("date").drop_duplicates("date").tail(days + 1)
+                    return df
+        except: continue
+    return None
+
+# Ana Akış
+uploaded_file = st.file_uploader("Excel Yükle:", type=["xlsx"])
+if uploaded_file:
+    wb = openpyxl.load_workbook(uploaded_file)
+    codes = [r[0].value for r in wb["Fon_Listesi"].iter_rows(min_row=2) if r[0].value]
+    
+    calc_funds = []
+    
+    # Adım 1: Önce 3 Aylık veriyle dene
+    days_to_try = MAX_DAYS_DEFAULT
+    
+    with st.spinner(f"Veriler {days_to_try} günlük olarak çekiliyor..."):
+        for code in codes:
+            df = get_tefas_price_data(code, days_to_try)
+            
+            # Adım 2: Hata alırsan (veri boşsa) 1 aylık ile tekrar dene
+            if df is None:
+                st.warning(f"{code} için 3 aylık veri çekilemedi, 1 aylık veriye düşülüyor...")
+                df = get_tefas_price_data(code, MAX_DAYS_FALLBACK)
+            
+            if df is not None:
+                # Basit metrikler
+                prices = df["price"].tolist()
+                ret = [(prices[i]/prices[i-1]-1)*100 for i in range(1, len(prices))]
+                calc_funds.append({"code": code, "prices": prices, "daily_returns": ret})
+    
+    if calc_funds:
+        st.success(f"{len(calc_funds)} fon analiz edildi.")
+        st.write(calc_funds)
+    else:
+        st.error("Veri çekilemedi. Bağlantı engelleniyor olabilir.")
