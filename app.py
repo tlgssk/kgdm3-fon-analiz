@@ -2,7 +2,8 @@ import datetime as dt
 import io
 import math
 import re
-from typing import Optional, List
+import urllib3
+from typing import Optional, List, Tuple
 
 import openpyxl
 import pandas as pd
@@ -13,17 +14,28 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 # ============================================================
-# SAYFA AYARLARI
+# GÜVENLİK DUVARI BYPASS (SSL & KİMLİK GİZLEME)
 # ============================================================
-st.set_page_config(page_title="Multi-Vade Fon Analizi V9", page_icon="📈", layout="wide")
-st.title("📈 Multi-Vade Fon Analizi V9")
-st.caption("Anti-Blokaj Veri Motoru (Doğrudan TEFAS API) + Gelişmiş Z-Skor + Tanh Benchmark")
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+req_session = requests.Session()
+req_session.verify = False  # Şirket ağlarındaki SSL engellerini aşar
+req_session.headers.update({
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/javascript, */*; q=0.01",
+    "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Connection": "keep-alive"
+})
 
 # ============================================================
-# GENEL AYARLAR
+# SAYFA AYARLARI & SABİTLER
 # ============================================================
+st.set_page_config(page_title="Multi-Vade Fon Analizi V10", page_icon="📈", layout="wide")
+st.title("📈 Multi-Vade Fon Analizi V10")
+st.caption("Hayalet Veri Motoru (Anti-Bot Bypass) + Detaylı Hata Loglama + Kusursuz Z-Skor")
+
 LOOKBACK_CALENDAR_DAYS = 400
-HTTP_TIMEOUT = 10
+HTTP_TIMEOUT = 12
 
 PERIODS = {"Kısa Vade (1 Hafta)": 5, "Orta Vade (1 Ay)": 21, "Uzun Vade (3 Ay)": 63, "Çok Uzun Vade (1 Yıl)": 252}
 MAX_DAYS = max(PERIODS.values())
@@ -45,18 +57,15 @@ COLOR_LIGHT_GREEN, COLOR_LIGHT_RED, COLOR_LIGHT_YELLOW = "E2F0D9", "FCE4D6", "FF
 def parse_number(value) -> Optional[float]:
     if value is None or isinstance(value, bool): return None
     if isinstance(value, (int, float)):
-        try:
-            if pd.isna(value): return None
-        except Exception: pass
-        return float(value)
+        try: return None if pd.isna(value) else float(value)
+        except: return float(value)
     text = str(value).strip().replace("₺", "").replace("TL", "").replace("%", "").replace(" ", "")
     if not text: return None
     if "," in text and "." in text:
         text = text.replace(".", "").replace(",", ".") if text.rfind(",") > text.rfind(".") else text.replace(",", "")
-    elif "," in text:
-        text = text.replace(",", ".")
+    elif "," in text: text = text.replace(",", ".")
     try: return float(text)
-    except (ValueError, TypeError): return None
+    except: return None
 
 def normalize_fund_code(value) -> str:
     if value is None: return ""
@@ -65,10 +74,9 @@ def normalize_fund_code(value) -> str:
 
 def safe_float(value, default=0.0):
     try:
-        if value is None: return default
-        value = float(value)
-        return default if math.isnan(value) or math.isinf(value) else value
-    except Exception: return default
+        val = float(value)
+        return default if math.isnan(val) or math.isinf(val) else val
+    except: return default
 
 def infer_category(title: str) -> str:
     if not title: return "Diğer"
@@ -84,73 +92,74 @@ def infer_category(title: str) -> str:
     return "Diğer"
 
 # ============================================================
-# CERRAHİ VERİ MOTORLARI (V9 - Doğrudan API Bağlantıları)
+# HAYALET VERİ MOTORLARI (V10)
 # ============================================================
-@st.cache_data(show_spinner=False, ttl=60 * 30)
 def fetch_fund_metadata(code: str) -> dict:
-    """TEFAS fon detay sayfasından HTML kazıyarak AUM ve Yatırımcı çeker (Engellenemez)."""
     url = f"https://www.tefas.gov.tr/FonAnaliz.aspx?FonKod={code.upper()}"
-    headers = {"User-Agent": "Mozilla/5.0"}
     meta = {"aum": 0.0, "investors": 0.0, "title": "", "category": ""}
     try:
-        res = requests.get(url, headers=headers, timeout=HTTP_TIMEOUT)
+        res = req_session.get(url, timeout=HTTP_TIMEOUT)
         if res.status_code == 200:
             html = res.text
             m_title = re.search(r'id="MainContent_FormViewMainIndicators_LabelFund"?[^>]*>([^<]+)</span>', html)
             if m_title: 
                 meta["title"] = m_title.group(1).strip()
                 meta["category"] = infer_category(meta["title"])
-                
             m_aum = re.search(r'id="MainContent_FormViewMainIndicators_LabelPortfolioValue"?[^>]*>([^<]+)</span>', html)
             if m_aum: meta["aum"] = parse_number(m_aum.group(1)) or 0.0
-            
             m_inv = re.search(r'id="MainContent_FormViewMainIndicators_LabelInvestorCount"?[^>]*>([^<]+)</span>', html)
             if m_inv: meta["investors"] = parse_number(m_inv.group(1)) or 0.0
     except: pass
     return meta
 
-@st.cache_data(show_spinner=False, ttl=60 * 30)
-def fetch_tefas_prices(code: str, start_date: dt.date, end_date: dt.date) -> Optional[pd.DataFrame]:
-    """TEFAS'ın grafik çizmek için kullandığı gizli API'sinden doğrudan fiyat çeker."""
-    url = "https://www.tefas.gov.tr/api/DB/BindHistoryInfo"
-    data = {
-        "fontip": "", "sfontur": "", "fonkod": code.upper(), "fongrup": "",
-        "baslangic": start_date.strftime("%d.%m.%Y"), "bitis": end_date.strftime("%d.%m.%Y")
-    }
-    headers = {
-        "User-Agent": "Mozilla/5.0", "X-Requested-With": "XMLHttpRequest",
-        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"
-    }
-    try:
-        res = requests.post(url, data=data, headers=headers, timeout=HTTP_TIMEOUT)
-        if res.status_code == 200:
-            data_list = res.json().get("data", [])
-            if data_list:
-                rows = [{"date": pd.Timestamp(dt.datetime.fromtimestamp(item["TARIH"] / 1000.0).date()), "price": float(item["FIYAT"])} for item in data_list if item.get("TARIH") and item.get("FIYAT")]
-                df = pd.DataFrame(rows).dropna()
-                df = df[df["price"] > 0]
-                if len(df) >= 2:
-                    return df.sort_values("date").drop_duplicates(subset=["date"], keep="last").tail(MAX_DAYS + 1).reset_index(drop=True)
-    except: pass
-    return None
-
-@st.cache_data(show_spinner=False, ttl=60 * 30)
-def fetch_isyatirim_series(code: str, start_date: dt.date, end_date: dt.date) -> Optional[pd.DataFrame]:
+def fetch_isyatirim_series(code: str, start_date: dt.date, end_date: dt.date) -> Tuple[Optional[pd.DataFrame], str]:
     url = "https://www.isyatirim.com.tr/_layouts/15/IsYatirim.Website/Common/Data.aspx/YatirimFonGecmisGetiri"
     params = {"fonKod": code.upper(), "baslangic": start_date.strftime("%d-%m-%Y"), "bitis": end_date.strftime("%d-%m-%Y")}
     try:
-        res = requests.get(url, params=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=HTTP_TIMEOUT)
+        res = req_session.get(url, params=params, timeout=HTTP_TIMEOUT)
+        res.raise_for_status()
         values = res.json().get("value")
-        if values:
-            df = pd.DataFrame(values)
-            df["date"] = pd.to_datetime(df.get("Tarih"), dayfirst=True, errors="coerce")
-            df["price"] = df.get("Fiyat").apply(parse_number)
-            df = df.dropna(subset=["date", "price"])
-            df = df[df["price"] > 0]
-            if len(df) >= 2:
-                return df.sort_values("date").drop_duplicates(subset=["date"], keep="last").tail(MAX_DAYS + 1).reset_index(drop=True)[["date", "price"]]
-    except: pass
-    return None
+        if not values: return None, "Veri boş döndü."
+        df = pd.DataFrame(values)
+        if "Tarih" not in df.columns or "Fiyat" not in df.columns: return None, "Tarih/Fiyat formatı hatalı."
+        df["date"] = pd.to_datetime(df.get("Tarih"), dayfirst=True, errors="coerce")
+        df["price"] = df.get("Fiyat").apply(parse_number)
+        df = df.dropna(subset=["date", "price"])
+        df = df[df["price"] > 0]
+        if len(df) < 2: return None, "Yeterli tarihsel veri yok."
+        return df.sort_values("date").drop_duplicates(subset=["date"], keep="last").tail(MAX_DAYS + 1).reset_index(drop=True), "OK"
+    except Exception as e: return None, f"İşYatırım Hatası: {str(e)}"
+
+def fetch_tefas_prices(code: str, start_date: dt.date, end_date: dt.date) -> Tuple[Optional[pd.DataFrame], str]:
+    url = "https://www.tefas.gov.tr/api/DB/BindHistoryInfo"
+    data = {"fontip": "", "sfontur": "", "fonkod": code.upper(), "fongrup": "", "baslangic": start_date.strftime("%d.%m.%Y"), "bitis": end_date.strftime("%d.%m.%Y")}
+    headers = {"Content-Type": "application/x-www-form-urlencoded; charset=UTF-8", "X-Requested-With": "XMLHttpRequest", "Referer": f"https://www.tefas.gov.tr/FonAnaliz.aspx?FonKod={code.upper()}"}
+    try:
+        res = req_session.post(url, data=data, headers=headers, timeout=HTTP_TIMEOUT)
+        res.raise_for_status()
+        data_list = res.json().get("data", [])
+        if not data_list: return None, "TEFAS API verisi boş."
+        rows = [{"date": pd.Timestamp(dt.datetime.fromtimestamp(item["TARIH"] / 1000.0).date()), "price": float(item["FIYAT"])} for item in data_list if item.get("TARIH") and item.get("FIYAT")]
+        df = pd.DataFrame(rows).dropna()
+        df = df[df["price"] > 0]
+        if len(df) < 2: return None, "Yeterli fiyat verisi yok."
+        return df.sort_values("date").drop_duplicates(subset=["date"], keep="last").tail(MAX_DAYS + 1).reset_index(drop=True), "OK"
+    except Exception as e: return None, f"TEFAS API Hatası: {str(e)}"
+
+def fetch_fintables_series(code: str) -> Tuple[Optional[pd.DataFrame], str]:
+    url = f"https://fintables.com/fonlar/{code.lower()}"
+    try:
+        res = req_session.get(url, timeout=HTTP_TIMEOUT)
+        res.raise_for_status()
+        pattern = re.compile(r'"date"\s*:\s*"(\d{4}-\d{2}-\d{2})"[^{}]{0,200}?"price"\s*:\s*([0-9]+(?:\.[0-9]+)?)', re.IGNORECASE)
+        matches = pattern.findall(res.text)
+        if not matches: return None, "Fintables Regex eşleşmedi."
+        rows = [{"date": pd.to_datetime(d), "price": parse_number(p)} for d, p in matches]
+        df = pd.DataFrame(rows).dropna()
+        df = df[df["price"] > 0]
+        if len(df) < 2: return None, "Yeterli fiyat verisi yok."
+        return df.sort_values("date").drop_duplicates(subset=["date"], keep="last").tail(MAX_DAYS + 1).reset_index(drop=True), "OK"
+    except Exception as e: return None, f"Fintables Hatası: {str(e)}"
 
 # ============================================================
 # METRİKLER (MDD, SORTINO)
@@ -167,14 +176,14 @@ def compute_max_drawdown(prices: List[float]) -> float:
 
 def compute_sortino(returns: List[float], daily_rf: float = 0.0, max_sortino: float = 10.0) -> float:
     if not returns: return 0.0
-    clean_returns = [float(r) for r in returns if r is not None and math.isfinite(float(r))]
-    if not clean_returns: return 0.0
-    excess = [r - daily_rf for r in clean_returns]
-    mean_excess = sum(excess) / len(excess)
-    downside_squared = [min(0.0, x) ** 2 for x in excess]
-    downside_deviation = math.sqrt(sum(downside_squared) / len(excess))
-    if downside_deviation <= 1e-12: return max_sortino if mean_excess > 0 else 0.0
-    return max(-max_sortino, min(max_sortino, mean_excess / downside_deviation))
+    clean = [float(r) for r in returns if r is not None and math.isfinite(float(r))]
+    if not clean: return 0.0
+    excess = [r - daily_rf for r in clean]
+    mean_ex = sum(excess) / len(excess)
+    downside_sq = [min(0.0, x) ** 2 for x in excess]
+    down_dev = math.sqrt(sum(downside_sq) / len(excess))
+    if down_dev <= 1e-12: return max_sortino if mean_ex > 0 else 0.0
+    return max(-max_sortino, min(max_sortino, mean_ex / down_dev))
 
 def compute_fund_metrics(series: Optional[pd.DataFrame], metadata: dict) -> Optional[dict]:
     if series is None or len(series) < 2: return None
@@ -200,27 +209,24 @@ def calculate_period_scores(funds: List[dict], days: int, daily_rf: float, use_c
             for m in ["mean", "vol", "shp", "cum", "mdd", "sortino"]: item[f"{m}_{days}"] = None
             continue
 
-        slice_ret, slice_prices = returns[-days:], prices[-(days + 1):]
-        mean_ret = sum(slice_ret) / len(slice_ret)
-        vol = math.sqrt(max(0.0, sum((r - mean_ret) ** 2 for r in slice_ret) / len(slice_ret)))
-        item[f"mean_{days}"] = mean_ret
-        item[f"vol_{days}"] = vol
-        item[f"shp_{days}"] = ((mean_ret - daily_rf) / vol * math.sqrt(252)) if vol > 1e-12 else 0.0
-        item[f"cum_{days}"] = (slice_prices[-1] / slice_prices[0] - 1.0) * 100.0 if slice_prices[0] > 0 else None
-        item[f"mdd_{days}"] = compute_max_drawdown(slice_prices)
-        item[f"sortino_{days}"] = compute_sortino(slice_ret, daily_rf=daily_rf)
+        s_ret, s_prices = returns[-days:], prices[-(days + 1):]
+        m_ret = sum(s_ret) / len(s_ret)
+        vol = math.sqrt(max(0.0, sum((r - m_ret) ** 2 for r in s_ret) / len(s_ret)))
+        item[f"mean_{days}"], item[f"vol_{days}"] = m_ret, vol
+        item[f"shp_{days}"] = ((m_ret - daily_rf) / vol * math.sqrt(252)) if vol > 1e-12 else 0.0
+        item[f"cum_{days}"] = (s_prices[-1] / s_prices[0] - 1.0) * 100.0 if s_prices[0] > 0 else None
+        item[f"mdd_{days}"] = compute_max_drawdown(s_prices)
+        item[f"sortino_{days}"] = compute_sortino(s_ret, daily_rf=daily_rf)
 
-    valid_indices = [i for i, f in enumerate(funds) if not f.get("filtered_out", False) and all(f.get(f"{m}_{days}") is not None for m in ["cum", "shp", "sortino", "mdd"])]
-    if not valid_indices:
-        for item in funds:
-            item[f"score_{days}"] = None
-            item[f"karar_{days}"] = "FİLTRE DIŞI" if item.get("filtered_out") else "YETERSİZ VERİ"
+    valid_idx = [i for i, f in enumerate(funds) if not f.get("filtered_out") and all(f.get(f"{m}_{days}") is not None for m in ["cum", "shp", "sortino", "mdd"])]
+    if not valid_idx:
+        for f in funds: f[f"score_{days}"], f[f"karar_{days}"] = None, "FİLTRE DIŞI" if f.get("filtered_out") else "YETERSİZ VERİ"
         return
 
-    categories = {}
+    cats = {}
     if use_category:
-        for idx in valid_indices: categories.setdefault(funds[idx].get("category") or "Diğer", []).append(idx)
-    else: categories = {"ALL": valid_indices}
+        for idx in valid_idx: cats.setdefault(funds[idx].get("category") or "Diğer", []).append(idx)
+    else: cats = {"ALL": valid_idx}
 
     def get_stats(indices, field):
         vals = [float(funds[i][f"{field}_{days}"]) for i in indices if funds[i].get(f"{field}_{days}") is not None and math.isfinite(float(funds[i][f"{field}_{days}"]))]
@@ -228,41 +234,35 @@ def calculate_period_scores(funds: List[dict], days: int, daily_rf: float, use_c
         m = sum(vals) / len(vals)
         return m, math.sqrt(max(0.0, sum((x - m) ** 2 for x in vals) / len(vals)))
 
-    def apply_scoring(eval_indices, target_indices):
-        if len(eval_indices) < 2:
-            for idx in target_indices: funds[idx][f"stat_score_{days}"] = None
+    def apply_scoring(eval_idx, target_idx):
+        if len(eval_idx) < 2:
+            for i in target_idx: funds[i][f"stat_score_{days}"] = None
             return
-        m_cum = get_stats(eval_indices, "cum")
-        m_shp = get_stats(eval_indices, "shp")
-        m_srt = get_stats(eval_indices, "sortino")
-        m_mdd = get_stats(eval_indices, "mdd")
-
+        m_cum, m_shp, m_srt, m_mdd = get_stats(eval_idx, "cum"), get_stats(eval_idx, "shp"), get_stats(eval_idx, "sortino"), get_stats(eval_idx, "mdd")
         def z(val, m, std): return max(-Z_LIMIT, min(Z_LIMIT, (float(val) - m) / std)) if val is not None and std > 1e-12 else 0.0
-        
-        for idx in target_indices:
-            f = funds[idx]
+        for i in target_idx:
+            f = funds[i]
             w_z = (W_CUM * z(f.get(f"cum_{days}"), *m_cum) + W_SHP * z(f.get(f"shp_{days}"), *m_shp) + W_SRT * z(f.get(f"sortino_{days}"), *m_srt) + W_MDD * z(f.get(f"mdd_{days}"), *m_mdd))
             f[f"stat_score_{days}"] = int(round(max(0.0, min(100.0, 50.0 + 20.0 * w_z))))
 
-    apply_scoring(valid_indices, valid_indices)
-    global_scores = {idx: funds[idx].get(f"stat_score_{days}") for idx in valid_indices}
+    apply_scoring(valid_idx, valid_idx)
+    g_scores = {i: funds[i].get(f"stat_score_{days}") for i in valid_idx}
 
-    for cat, indices in categories.items():
-        n = len(indices)
-        if n >= 10:
+    for cat, indices in cats.items():
+        if len(indices) >= 10:
             apply_scoring(indices, indices)
-            for idx in indices: funds[idx][f"score_{days}"] = funds[idx].get(f"stat_score_{days}")
-        elif n >= 5:
+            for i in indices: funds[i][f"score_{days}"] = funds[i].get(f"stat_score_{days}")
+        elif len(indices) >= 5:
             apply_scoring(indices, indices)
-            for idx in indices:
-                cat_s, glob_s = funds[idx].get(f"stat_score_{days}"), global_scores.get(idx)
-                if cat_s is not None and glob_s is not None: funds[idx][f"score_{days}"] = int(round(0.60 * cat_s + 0.40 * glob_s))
-                else: funds[idx][f"score_{days}"] = cat_s if cat_s is not None else glob_s
+            for i in indices:
+                c_s, g_s = funds[i].get(f"stat_score_{days}"), g_scores.get(i)
+                if c_s is not None and g_s is not None: funds[i][f"score_{days}"] = int(round(0.60 * c_s + 0.40 * g_s))
+                else: funds[i][f"score_{days}"] = c_s if c_s is not None else g_s
         else:
-            for idx in indices: funds[idx][f"score_{days}"] = global_scores.get(idx)
+            for i in indices: funds[i][f"score_{days}"] = g_scores.get(i)
 
     for item in funds:
-        if item.get("filtered_out", False):
+        if item.get("filtered_out"):
             if item.get(f"cum_{days}") is not None: item[f"score_{days}"], item[f"karar_{days}"] = None, "FİLTRE DIŞI"
             continue
         bs = item.get(f"score_{days}")
@@ -279,25 +279,25 @@ def calculate_period_scores(funds: List[dict], days: int, daily_rf: float, use_c
 # YAHOO & BENCHMARK
 # ============================================================
 @st.cache_data(show_spinner=False, ttl=60 * 30)
-def fetch_yahoo_series(symbol: str, start_date: dt.date, end_date: dt.date) -> Optional[pd.DataFrame]:
+def fetch_yahoo_series(symbol: str, start_date: dt.date, end_date: dt.date) -> Tuple[Optional[pd.DataFrame], str]:
     try:
-        p1 = int(dt.datetime.combine(start_date, dt.time.min).timestamp())
-        p2 = int(dt.datetime.combine(end_date + dt.timedelta(days=1), dt.time.min).timestamp())
-        res = requests.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}", params={"period1": p1, "period2": p2, "interval": "1d", "events": "history", "includeAdjustedClose": "true"}, headers={"User-Agent": "Mozilla/5.0"}, timeout=HTTP_TIMEOUT)
+        p1, p2 = int(dt.datetime.combine(start_date, dt.time.min).timestamp()), int(dt.datetime.combine(end_date + dt.timedelta(days=1), dt.time.min).timestamp())
+        res = req_session.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}", params={"period1": p1, "period2": p2, "interval": "1d", "events": "history", "includeAdjustedClose": "true"}, timeout=HTTP_TIMEOUT)
         res.raise_for_status()
         result = res.json().get("chart", {}).get("result", [{}])[0]
         t_stamps, closes = result.get("timestamp"), result.get("indicators", {}).get("quote", [{}])[0].get("close")
-        if not t_stamps or not closes: return None
+        if not t_stamps or not closes: return None, "Yahoo verisi boş."
         rows = [{"date": pd.Timestamp(dt.datetime.fromtimestamp(t).date()), "price": float(c)} for t, c in zip(t_stamps, closes) if c is not None and float(c) > 0]
-        if len(rows) < 2: return None
-        return pd.DataFrame(rows).sort_values("date").drop_duplicates(subset=["date"], keep="last").reset_index(drop=True)
-    except: return None
+        if len(rows) < 2: return None, "Yeterli fiyat yok."
+        return pd.DataFrame(rows).sort_values("date").drop_duplicates(subset=["date"], keep="last").reset_index(drop=True), "OK"
+    except Exception as e: return None, str(e)
 
-@st.cache_data(show_spinner=False, ttl=60 * 30)
 def fetch_kut_benchmark(start_date: dt.date, end_date: dt.date) -> Optional[pd.DataFrame]:
-    gold, silver, usd = fetch_yahoo_series("GC=F", start_date, end_date), fetch_yahoo_series("SI=F", start_date, end_date), fetch_yahoo_series("USDTRY=X", start_date, end_date)
-    if gold is None or silver is None or usd is None: return None
-    df = gold.rename(columns={"price": "g"}).merge(silver.rename(columns={"price": "s"}), on="date").merge(usd.rename(columns={"price": "u"}), on="date")
+    g, _ = fetch_yahoo_series("GC=F", start_date, end_date)
+    s, _ = fetch_yahoo_series("SI=F", start_date, end_date)
+    u, _ = fetch_yahoo_series("USDTRY=X", start_date, end_date)
+    if g is None or s is None or u is None: return None
+    df = g.rename(columns={"price": "g"}).merge(s.rename(columns={"price": "s"}), on="date").merge(u.rename(columns={"price": "u"}), on="date")
     if df.empty: return None
     gt, st = df["g"] * df["u"], df["s"] * df["u"]
     df["benchmark"] = KUT_GOLD_WEIGHT * (gt / gt.iloc[0]) + KUT_SILVER_WEIGHT * (st / st.iloc[0]) + KUT_CASH_WEIGHT
@@ -363,7 +363,6 @@ with st.sidebar:
     min_aum = st.number_input("Minimum Portföy Büyüklüğü (TL)", min_value=0.0, value=50_000_000.0, step=10_000_000.0)
     min_investors = st.number_input("Minimum Yatırımcı Sayısı", min_value=0, value=100, step=50)
     use_category_scoring = st.checkbox("Kategori bazlı skorlama kullan", value=True)
-    st.divider()
 
 daily_rf = ((1 + annual_rf_rate / 100.0) ** (1 / 252.0) - 1) * 100.0
 
@@ -379,44 +378,59 @@ for row in wb["Fon_Listesi"].iter_rows(min_row=2, values_only=False):
         c = normalize_fund_code(row[0].value)
         if c: req_codes.append(c); valor_map[c] = parse_number(row[1].value) if len(row) > 1 and row[1].value is not None else 0.0
 req_codes = list(dict.fromkeys(req_codes))
-
-today = dt.date.today()
-start_date = today - dt.timedelta(days=LOOKBACK_CALENDAR_DAYS)
+today, start_date = dt.date.today(), dt.date.today() - dt.timedelta(days=LOOKBACK_CALENDAR_DAYS)
 
 # ============================================================
-# ANA VERİ TOPLAMA BLOĞU (V9)
+# ANA VERİ TOPLAMA BLOĞU (V10)
 # ============================================================
-with st.spinner("Fon verileri doğrudan API'lerden indiriliyor..."):
-    calc_funds, fail_codes = [], []
-    bar = st.progress(0)
-    st_text = st.empty()
+with st.spinner("Fon verileri 3 farklı API üzerinden güvenli bağlantı ile aranıyor..."):
+    calc_funds, fail_codes, error_logs = [], [], []
+    bar, st_text = st.progress(0), st.empty()
     tot = len(req_codes)
 
     for i, code in enumerate(req_codes):
         st_text.text(f"İndiriliyor ve Analiz Ediliyor: {code} ({i+1}/{tot})")
         
-        # 1. Metadata TEFAS'tan HTML kazıyarak alınır (Engellenmez)
         meta = fetch_fund_metadata(code)
+        series, src, errs = None, "Bulunamadı", []
         
-        # 2. Fiyatlar TEFAS Grafik API'sinden çekilir
-        series, src = fetch_tefas_prices(code, start_date, today), "TEFAS"
-        
-        # 3. Eğer TEFAS başarısız olursa İş Yatırım denenir
-        if series is None:
-            series, src = fetch_isyatirim_series(code, start_date, today), "İş Yatırım" if fetch_isyatirim_series(code, start_date, today) is not None else "Bulunamadı"
+        # 1. İş Yatırım
+        series, err = fetch_isyatirim_series(code, start_date, today)
+        if series is not None: src = "İş Yatırım"
+        else: errs.append(err)
 
-        metrics = compute_fund_metrics(series, meta)
-        if metrics:
+        # 2. TEFAS API (Fallback)
+        if series is None:
+            series, err = fetch_tefas_prices(code, start_date, today)
+            if series is not None: src = "TEFAS"
+            else: errs.append(err)
+            
+        # 3. Fintables (Son Çare)
+        if series is None:
+            series, err = fetch_fintables_series(code)
+            if series is not None: src = "Fintables"
+            else: errs.append(err)
+
+        if series is not None:
+            metrics = compute_fund_metrics(series, meta)
             metrics.update({"code": code, "source": src, "valor": valor_map.get(code, 0.0)})
             a_ok = metrics["aum"] >= min_aum if metrics["aum"] > 0 else True
             i_ok = metrics["investors"] >= min_investors if metrics["investors"] > 0 else True
             metrics["filtered_out"] = not (a_ok and i_ok)
             calc_funds.append(metrics)
-        else: fail_codes.append(code)
+        else: 
+            fail_codes.append(code)
+            error_logs.append(f"[{code}] Tüm API'ler reddetti:\n" + "\n".join(errs))
+            
         bar.progress((i + 1) / tot)
         
-    st_text.empty()
-    bar.empty()
+    st_text.empty(); bar.empty()
+
+# HATA LOGLARI EKRANI (Kullanıcı Neden Çekilemediğini Görür)
+if error_logs:
+    with st.expander("🛠️ Hata Logları (Fonlar Neden İndirilemedi?)", expanded=True):
+        st.write("Aşağıdaki fonlar için kurumların (İş Yatırım, TEFAS) güvenlik duvarları erişimi reddetti. SSL sertifikanız, VPN veya şirket ağınız bunu tetikliyor olabilir.")
+        for log in error_logs: st.code(log)
 
 st.success(f"✅ {len(calc_funds)} fonun verisi başarıyla indirildi. Skorlamaya geçiliyor...")
 if fail_codes: st.warning(f"⚠️ Veri bulunamayan fonlar: {', '.join(fail_codes)}")
@@ -432,7 +446,6 @@ calc_funds.sort(key=lambda x: x.get("final_score") if x.get("final_score") is no
 # ============================================================
 if "Vade_Analizi" in wb.sheetnames: del wb["Vade_Analizi"]
 ws_out = wb.create_sheet("Vade_Analizi", 0)
-
 headers = [
     "Fon Kodu", "Kategori", "AUM (TL)", "Yatırımcı",
     "1H Skor", "1H Karar", "1H Küm %", "1H MDD %", "1H Valor Ceza",
@@ -446,14 +459,11 @@ headers = [
     "Benchmark Ort. Skor", "Kaynak"
 ]
 ws_out.append(headers)
-
 for cell in ws_out[1]: cell.fill, cell.font, cell.alignment = PatternFill(start_color=COLOR_NAVY, fill_type="solid"), Font(color=COLOR_WHITE, bold=True), Alignment(horizontal="center", vertical="center", wrap_text=True)
-
 def fmt(v): return v if v is not None else "-"
 
 for f in calc_funds:
     bs = [f.get(f"benchmark_score_{d}") for d in PERIODS.values() if f.get(f"benchmark_score_{d}") is not None]
-    b_avg = round(sum(bs) / len(bs), 1) if bs else "-"
     ws_out.append([
         f["code"], f.get("category", "-"), fmt(f.get("aum")), fmt(f.get("investors")),
         fmt(f.get("score_5")), f.get("karar_5", "-"), fmt(f.get("cum_5")), fmt(f.get("mdd_5")), fmt(f.get("valor_penalty_5")),
@@ -464,7 +474,7 @@ for f in calc_funds:
         fmt(f.get("final_score")), f.get("final_decision", "-"),
         fmt(f.get("benchmark_5")), fmt(f.get("benchmark_diff_5")), fmt(f.get("benchmark_21")), fmt(f.get("benchmark_diff_21")),
         fmt(f.get("benchmark_63")), fmt(f.get("benchmark_diff_63")), fmt(f.get("benchmark_252")), fmt(f.get("benchmark_diff_252")),
-        b_avg, f.get("source", "-")
+        round(sum(bs)/len(bs), 1) if bs else "-", f.get("source", "-")
     ])
 
 green, red, yellow = Font(color=COLOR_GREEN, bold=True), Font(color=COLOR_RED, bold=True), Font(color=COLOR_YELLOW, bold=True)
@@ -489,7 +499,6 @@ for r in range(2, ws_out.max_row + 1):
 for r in range(2, ws_out.max_row + 1):
     for c in [7, 8, 9, 12, 13, 14, 17, 18, 19, 22, 23, 24, 30, 31, 32, 33, 34, 35, 36, 37]:
         if isinstance(ws_out.cell(r, c).value, (int, float)): ws_out.cell(r, c).number_format = '0.00"%"'
-
 for c in ws_out.columns: ws_out.column_dimensions[get_column_letter(c[0].column)].width = min(max(max([len(str(cl.value)) for cl in c]) + 2, 11), 26)
 ws_out.freeze_panes, ws_out.auto_filter.ref = "B2", ws_out.dimensions
 
@@ -500,7 +509,7 @@ out.seek(0)
 # ============================================================
 # SONUÇ EKRANI
 # ============================================================
-st.download_button("📥 V9 Excel Çıktısını İndir", data=out, file_name="fon_vade_analizi_V9.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+st.download_button("📥 V10 Excel Çıktısını İndir", data=out, file_name="fon_vade_analizi_V10.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 st.subheader("📊 Fon Sıralaması Önizleme")
-df_p = pd.DataFrame([{"Fon": f["code"], "Kategori": f.get("category", "-"), "1H": fmt(f.get("score_5")), "1A": fmt(f.get("score_21")), "3A": fmt(f.get("score_63")), "1Y": fmt(f.get("score_252")), "Nihai Skor": fmt(f.get("final_score")), "Nihai Karar": f.get("final_decision", "-"), "Güven": f.get("confidence", "-"), "AUM": fmt(f.get("aum"))} for f in calc_funds])
+df_p = pd.DataFrame([{"Fon": f["code"], "Kategori": f.get("category", "-"), "1H": fmt(f.get("score_5")), "1A": fmt(f.get("score_21")), "3A": fmt(f.get("score_63")), "1Y": fmt(f.get("score_252")), "Nihai Skor": fmt(f.get("final_score")), "Nihai Karar": f.get("final_decision", "-"), "Güven": f.get("confidence", "-"), "Kaynak": f.get("source", "-")} for f in calc_funds])
 st.dataframe(df_p, use_container_width=True, hide_index=True)
