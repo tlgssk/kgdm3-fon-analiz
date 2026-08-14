@@ -46,7 +46,6 @@ TARGET_WEEKLY_RETURN = st.sidebar.slider(
     max_value=10.00,
     value=1.00,
     step=0.10,
-    format="%%.2f",
     help="Fonların analizde baz alınacak minimum haftalık getiri beklentisi (%0.50'den başlar, 0.10 artar)."
 )
 
