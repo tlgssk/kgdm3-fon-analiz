@@ -15,13 +15,13 @@ from openpyxl.utils import get_column_letter
 st.set_page_config(page_title="KGDM-3 Fon Analiz Otomasyonu", page_icon="📊", layout="wide")
 
 st.title("📊 KGDM-3 Fon Analiz ve Excel Otomasyonu")
-st.caption("Yüksek Getiri & Sermaye Koruma Stratejisi | Balina Takibi, MaxDD Kalkanı ve Son 5 Günlük Trend Analizi.")
+st.caption("Dengelenmiş Z-Skor (Clipping) Algoritması | Yüksek Getiri, MaxDD Kalkanı ve Son 5 Günlük Trend Analizi.")
 
 FUND_KINDS = ("YAT", "EMK", "BYF")
 LOOKBACK_CALENDAR_DAYS = 35
 TARGET_TRADING_DAYS = 10
 HTTP_TIMEOUT = 8
-APP_VERSION = "4.6.0"
+APP_VERSION = "4.7.0"
 
 COLOR_NAVY = "1F4E79"
 COLOR_GREEN = "008000"
@@ -243,7 +243,10 @@ def zscore(values: list[float]) -> list[float]:
     std = variance ** 0.5
     
     if std < 1e-12: return [0.0 for _ in values]
-    return [(float(value) - mean_value) / std for value in values]
+    
+    # Z-Skorları -2.5 ile +2.5 arasında sınırlandırarak (clipping) uçuşmaları engelliyoruz
+    raw_z = [(float(value) - mean_value) / std for value in values]
+    return [max(-2.5, min(2.5, z)) for z in raw_z]
 
 def style_excel_sheet(ws):
     thin_gray = Side(style="thin", color="D9E1F2")
@@ -493,11 +496,11 @@ for d in range(1, n_days + 1):
         val = item["valor"]
         v_pen = (val * 0.5) if val is not None else 0.0
         
-        # OMRON / DENGELI YÜKSEK GETİRİ & SERMAYE KORUMA FORMÜLÜ:
-        # Getiri(15) + Sharpe(20) + Kümülatif(15) + AUM(10) + Yatırımcı(10) - MaxDD Cezası(30) - Valör
-        raw_score = 50 + 15 * z_m[i] + 20 * z_s[i] + 15 * z_c[i] + 10 * z_a[i] + 10 * z_i[i] - 30 * z_d[i] - v_pen
+        # DENGELENMİŞ (CLIPPED) Z-SKOR FORMÜLÜ:
+        raw_score = 50 + 15 * z_m[i] + 20 * z_s[i] + 15 * z_c[i] + 10 * z_a[i] + 10 * z_i[i] - 15 * z_d[i] - v_pen
         
-        score = int(round(max(0.0, min(100.0, raw_score))))
+        # Puanların 5 ile 95 arasında yumuşak dağılması sağlanır (0 ve 100 kilitlenmesi biter)
+        score = int(round(max(5.0, min(95.0, raw_score))))
         item["running_scores"].append(score)
 
 for item in calculated_funds:
@@ -574,7 +577,7 @@ def color_cells(value):
 try: styled_df = df_display.style.map(color_cells)
 except AttributeError: styled_df = df_display.style.applymap(color_cells)
 
-st.subheader("📊 KGDM-3 Fon Sonuçları (Dengeli Büyüme & Sermaye Koruma)")
+st.subheader("📊 KGDM-3 Fon Sonuçları (Dengelenmiş Dağılım)")
 st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
 strong_buy_count = sum(item["kgdm_skor"] >= 60 for item in calculated_funds)
@@ -600,7 +603,7 @@ if source_errors:
         st.dataframe(pd.DataFrame(source_errors), use_container_width=True, hide_index=True)
 
 output = create_excel_output(wb=wb, ws_list=ws_list, calculated_funds=calculated_funds, n_days=n_days)
-st.success(f"✅ Analiz tamamlandı. {len(calculated_funds)} fon, yüksek getiri (getiri/momentum) ve sermaye koruma (Sharpe/MaxDD kalkanı) dengesine göre yeniden puanlandı.")
+st.success(f"✅ Analiz tamamlandı. {len(calculated_funds)} fon için Z-skor kırpma (clipping) ve homojen puanlama optimizasyonu uygulandı.")
 
 st.download_button(label="📥 Güncellenmiş Excel'i İndir", data=output, file_name="fonlar_guncel.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 st.caption(f"KGDM-3 Fon Analiz Otomasyonu v{APP_VERSION} | Analiz tarihi: {today.strftime('%d.%m.%Y')}")
