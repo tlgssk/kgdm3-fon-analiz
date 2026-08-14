@@ -14,14 +14,14 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 # ============================================================
-# GÜVENLİK DUVARI BYPASS (SSL & KİMLİK GİZLEME)
+# GÜVENLİK DUVARI BYPASS & ÇEREZ YÖNETİMİ
 # ============================================================
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 req_session = requests.Session()
-req_session.verify = False  # Şirket ağlarındaki SSL engellerini aşar
+req_session.verify = False
 req_session.headers.update({
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
     "Accept": "application/json, text/javascript, */*; q=0.01",
     "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
     "Connection": "keep-alive"
@@ -30,9 +30,9 @@ req_session.headers.update({
 # ============================================================
 # SAYFA AYARLARI & SABİTLER
 # ============================================================
-st.set_page_config(page_title="Multi-Vade Fon Analizi V10", page_icon="📈", layout="wide")
-st.title("📈 Multi-Vade Fon Analizi V10")
-st.caption("Hayalet Veri Motoru (Anti-Bot Bypass) + Detaylı Hata Loglama + Kusursuz Z-Skor")
+st.set_page_config(page_title="Multi-Vade Fon Analizi V11", page_icon="📈", layout="wide")
+st.title("📈 Multi-Vade Fon Analizi V11")
+st.caption("Güncel API Uç Noktaları + PyTefas Motoru + Cookie Bypass + Kusursuz Z-Skor")
 
 LOOKBACK_CALENDAR_DAYS = 400
 HTTP_TIMEOUT = 12
@@ -92,7 +92,7 @@ def infer_category(title: str) -> str:
     return "Diğer"
 
 # ============================================================
-# HAYALET VERİ MOTORLARI (V10)
+# GÜNCEL VERİ MOTORLARI (V11)
 # ============================================================
 def fetch_fund_metadata(code: str) -> dict:
     url = f"https://www.tefas.gov.tr/FonAnaliz.aspx?FonKod={code.upper()}"
@@ -112,54 +112,80 @@ def fetch_fund_metadata(code: str) -> dict:
     except: pass
     return meta
 
+def fetch_pytefas_single(code: str, start_date: dt.date, end_date: dt.date) -> Tuple[Optional[pd.DataFrame], str]:
+    try:
+        from pytefas import Crawler
+        c = Crawler(timeout=10, max_retry=2)
+        df = c.fetch(start=start_date.strftime("%Y-%m-%d"), end=end_date.strftime("%Y-%m-%d"), name=code.upper(), columns=['date', 'price'])
+        if df is not None and not df.empty:
+            df['date'] = pd.to_datetime(df['date'], errors='coerce')
+            df['price'] = df['price'].apply(parse_number)
+            df = df.dropna(subset=['date', 'price'])
+            df = df[df['price'] > 0]
+            if len(df) >= 2:
+                return df.sort_values("date").drop_duplicates(subset=["date"], keep="last").tail(MAX_DAYS + 1).reset_index(drop=True), "OK"
+        return None, "PyTefas veri bulamadı."
+    except Exception as e: return None, f"PyTefas Hatası: {str(e)}"
+
+def fetch_tefas_prices(code: str, start_date: dt.date, end_date: dt.date) -> Tuple[Optional[pd.DataFrame], str]:
+    # V11: TEFAS uç noktası Record olarak güncellendi. Farklı Fon tipleri deneniyor.
+    urls = ["https://www.tefas.gov.tr/api/DB/BindHistoryRecord", "https://www.tefas.gov.tr/api/DB/BindHistoryInfo"]
+    for url in urls:
+        for fontip in ["YAT", "EMK", "BYF"]:
+            data = {"fontip": fontip, "sfontur": "", "fonkod": code.upper(), "fongrup": "", "baslangic": start_date.strftime("%d.%m.%Y"), "bitis": end_date.strftime("%d.%m.%Y")}
+            headers = {"Content-Type": "application/x-www-form-urlencoded; charset=UTF-8", "X-Requested-With": "XMLHttpRequest", "Referer": f"https://www.tefas.gov.tr/FonAnaliz.aspx?FonKod={code.upper()}"}
+            try:
+                res = req_session.post(url, data=data, headers=headers, timeout=10)
+                if res.status_code == 200:
+                    data_list = res.json().get("data", [])
+                    if data_list:
+                        rows = [{"date": pd.Timestamp(dt.datetime.fromtimestamp(item["TARIH"] / 1000.0).date()), "price": float(item["FIYAT"])} for item in data_list if item.get("TARIH") and item.get("FIYAT")]
+                        df = pd.DataFrame(rows).dropna()
+                        df = df[df["price"] > 0]
+                        if len(df) >= 2:
+                            return df.sort_values("date").drop_duplicates(subset=["date"], keep="last").tail(MAX_DAYS + 1).reset_index(drop=True), "OK"
+            except: pass
+    return None, "TEFAS API (Yeni Uç Noktalar) başarısız."
+
 def fetch_isyatirim_series(code: str, start_date: dt.date, end_date: dt.date) -> Tuple[Optional[pd.DataFrame], str]:
+    # V11: Ana sayfaya bağlanarak Cookie (401 engeli için) al
+    try: req_session.get("https://www.isyatirim.com.tr/tr-tr/analiz/fon/Sayfalar/default.aspx", timeout=5)
+    except: pass
+
     url = "https://www.isyatirim.com.tr/_layouts/15/IsYatirim.Website/Common/Data.aspx/YatirimFonGecmisGetiri"
     params = {"fonKod": code.upper(), "baslangic": start_date.strftime("%d-%m-%Y"), "bitis": end_date.strftime("%d-%m-%Y")}
     try:
         res = req_session.get(url, params=params, timeout=HTTP_TIMEOUT)
         res.raise_for_status()
         values = res.json().get("value")
-        if not values: return None, "Veri boş döndü."
+        if not values: return None, "İş Yatırım: Veri boş."
         df = pd.DataFrame(values)
-        if "Tarih" not in df.columns or "Fiyat" not in df.columns: return None, "Tarih/Fiyat formatı hatalı."
+        if "Tarih" not in df.columns or "Fiyat" not in df.columns: return None, "Format hatalı."
         df["date"] = pd.to_datetime(df.get("Tarih"), dayfirst=True, errors="coerce")
         df["price"] = df.get("Fiyat").apply(parse_number)
         df = df.dropna(subset=["date", "price"])
         df = df[df["price"] > 0]
-        if len(df) < 2: return None, "Yeterli tarihsel veri yok."
+        if len(df) < 2: return None, "Yetersiz fiyat verisi."
         return df.sort_values("date").drop_duplicates(subset=["date"], keep="last").tail(MAX_DAYS + 1).reset_index(drop=True), "OK"
     except Exception as e: return None, f"İşYatırım Hatası: {str(e)}"
 
-def fetch_tefas_prices(code: str, start_date: dt.date, end_date: dt.date) -> Tuple[Optional[pd.DataFrame], str]:
-    url = "https://www.tefas.gov.tr/api/DB/BindHistoryInfo"
-    data = {"fontip": "", "sfontur": "", "fonkod": code.upper(), "fongrup": "", "baslangic": start_date.strftime("%d.%m.%Y"), "bitis": end_date.strftime("%d.%m.%Y")}
-    headers = {"Content-Type": "application/x-www-form-urlencoded; charset=UTF-8", "X-Requested-With": "XMLHttpRequest", "Referer": f"https://www.tefas.gov.tr/FonAnaliz.aspx?FonKod={code.upper()}"}
-    try:
-        res = req_session.post(url, data=data, headers=headers, timeout=HTTP_TIMEOUT)
-        res.raise_for_status()
-        data_list = res.json().get("data", [])
-        if not data_list: return None, "TEFAS API verisi boş."
-        rows = [{"date": pd.Timestamp(dt.datetime.fromtimestamp(item["TARIH"] / 1000.0).date()), "price": float(item["FIYAT"])} for item in data_list if item.get("TARIH") and item.get("FIYAT")]
-        df = pd.DataFrame(rows).dropna()
-        df = df[df["price"] > 0]
-        if len(df) < 2: return None, "Yeterli fiyat verisi yok."
-        return df.sort_values("date").drop_duplicates(subset=["date"], keep="last").tail(MAX_DAYS + 1).reset_index(drop=True), "OK"
-    except Exception as e: return None, f"TEFAS API Hatası: {str(e)}"
-
 def fetch_fintables_series(code: str) -> Tuple[Optional[pd.DataFrame], str]:
-    url = f"https://fintables.com/fonlar/{code.lower()}"
-    try:
-        res = req_session.get(url, timeout=HTTP_TIMEOUT)
-        res.raise_for_status()
-        pattern = re.compile(r'"date"\s*:\s*"(\d{4}-\d{2}-\d{2})"[^{}]{0,200}?"price"\s*:\s*([0-9]+(?:\.[0-9]+)?)', re.IGNORECASE)
-        matches = pattern.findall(res.text)
-        if not matches: return None, "Fintables Regex eşleşmedi."
-        rows = [{"date": pd.to_datetime(d), "price": parse_number(p)} for d, p in matches]
-        df = pd.DataFrame(rows).dropna()
-        df = df[df["price"] > 0]
-        if len(df) < 2: return None, "Yeterli fiyat verisi yok."
-        return df.sort_values("date").drop_duplicates(subset=["date"], keep="last").tail(MAX_DAYS + 1).reset_index(drop=True), "OK"
-    except Exception as e: return None, f"Fintables Hatası: {str(e)}"
+    # V11: Fintables yeni uç nokta denemeleri (/fon/)
+    urls = [f"https://fintables.com/fon/{code.lower()}", f"https://fintables.com/fonlar/{code.lower()}"]
+    for url in urls:
+        try:
+            res = req_session.get(url, timeout=HTTP_TIMEOUT)
+            if res.status_code == 200:
+                pattern = re.compile(r'"date"\s*:\s*"(\d{4}-\d{2}-\d{2})"[^{}]{0,200}?"price"\s*:\s*([0-9]+(?:\.[0-9]+)?)', re.IGNORECASE)
+                matches = pattern.findall(res.text)
+                if matches:
+                    rows = [{"date": pd.to_datetime(d), "price": parse_number(p)} for d, p in matches]
+                    df = pd.DataFrame(rows).dropna()
+                    df = df[df["price"] > 0]
+                    if len(df) >= 2:
+                        return df.sort_values("date").drop_duplicates(subset=["date"], keep="last").tail(MAX_DAYS + 1).reset_index(drop=True), "OK"
+        except: pass
+    return None, "Fintables Regex/Uç nokta başarısız."
 
 # ============================================================
 # METRİKLER (MDD, SORTINO)
@@ -240,6 +266,7 @@ def calculate_period_scores(funds: List[dict], days: int, daily_rf: float, use_c
             return
         m_cum, m_shp, m_srt, m_mdd = get_stats(eval_idx, "cum"), get_stats(eval_idx, "shp"), get_stats(eval_idx, "sortino"), get_stats(eval_idx, "mdd")
         def z(val, m, std): return max(-Z_LIMIT, min(Z_LIMIT, (float(val) - m) / std)) if val is not None and std > 1e-12 else 0.0
+        
         for i in target_idx:
             f = funds[i]
             w_z = (W_CUM * z(f.get(f"cum_{days}"), *m_cum) + W_SHP * z(f.get(f"shp_{days}"), *m_shp) + W_SRT * z(f.get(f"sortino_{days}"), *m_srt) + W_MDD * z(f.get(f"mdd_{days}"), *m_mdd))
@@ -262,7 +289,7 @@ def calculate_period_scores(funds: List[dict], days: int, daily_rf: float, use_c
             for i in indices: funds[i][f"score_{days}"] = g_scores.get(i)
 
     for item in funds:
-        if item.get("filtered_out"):
+        if item.get("filtered_out", False):
             if item.get(f"cum_{days}") is not None: item[f"score_{days}"], item[f"karar_{days}"] = None, "FİLTRE DIŞI"
             continue
         bs = item.get(f"score_{days}")
@@ -381,31 +408,36 @@ req_codes = list(dict.fromkeys(req_codes))
 today, start_date = dt.date.today(), dt.date.today() - dt.timedelta(days=LOOKBACK_CALENDAR_DAYS)
 
 # ============================================================
-# ANA VERİ TOPLAMA BLOĞU (V10)
+# ANA VERİ TOPLAMA BLOĞU (V11)
 # ============================================================
-with st.spinner("Fon verileri 3 farklı API üzerinden güvenli bağlantı ile aranıyor..."):
+with st.spinner("Anti-Blokaj Veri Motoru çalışıyor..."):
     calc_funds, fail_codes, error_logs = [], [], []
     bar, st_text = st.progress(0), st.empty()
     tot = len(req_codes)
 
     for i, code in enumerate(req_codes):
         st_text.text(f"İndiriliyor ve Analiz Ediliyor: {code} ({i+1}/{tot})")
-        
         meta = fetch_fund_metadata(code)
         series, src, errs = None, "Bulunamadı", []
         
-        # 1. İş Yatırım
-        series, err = fetch_isyatirim_series(code, start_date, today)
-        if series is not None: src = "İş Yatırım"
+        # 1. PyTefas
+        series, err = fetch_pytefas_single(code, start_date, today)
+        if series is not None: src = "PyTefas"
         else: errs.append(err)
 
-        # 2. TEFAS API (Fallback)
+        # 2. TEFAS API (Yeni Uç Nokta)
         if series is None:
             series, err = fetch_tefas_prices(code, start_date, today)
             if series is not None: src = "TEFAS"
             else: errs.append(err)
             
-        # 3. Fintables (Son Çare)
+        # 3. İş Yatırım (Cookie)
+        if series is None:
+            series, err = fetch_isyatirim_series(code, start_date, today)
+            if series is not None: src = "İş Yatırım"
+            else: errs.append(err)
+            
+        # 4. Fintables (Yeni Uç Nokta)
         if series is None:
             series, err = fetch_fintables_series(code)
             if series is not None: src = "Fintables"
@@ -426,10 +458,9 @@ with st.spinner("Fon verileri 3 farklı API üzerinden güvenli bağlantı ile a
         
     st_text.empty(); bar.empty()
 
-# HATA LOGLARI EKRANI (Kullanıcı Neden Çekilemediğini Görür)
 if error_logs:
     with st.expander("🛠️ Hata Logları (Fonlar Neden İndirilemedi?)", expanded=True):
-        st.write("Aşağıdaki fonlar için kurumların (İş Yatırım, TEFAS) güvenlik duvarları erişimi reddetti. SSL sertifikanız, VPN veya şirket ağınız bunu tetikliyor olabilir.")
+        st.write("Aşağıdaki fonlar için kurumların güvenlik duvarları erişimi reddetti.")
         for log in error_logs: st.code(log)
 
 st.success(f"✅ {len(calc_funds)} fonun verisi başarıyla indirildi. Skorlamaya geçiliyor...")
@@ -509,7 +540,7 @@ out.seek(0)
 # ============================================================
 # SONUÇ EKRANI
 # ============================================================
-st.download_button("📥 V10 Excel Çıktısını İndir", data=out, file_name="fon_vade_analizi_V10.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+st.download_button("📥 V11 Excel Çıktısını İndir", data=out, file_name="fon_vade_analizi_V11.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 st.subheader("📊 Fon Sıralaması Önizleme")
 df_p = pd.DataFrame([{"Fon": f["code"], "Kategori": f.get("category", "-"), "1H": fmt(f.get("score_5")), "1A": fmt(f.get("score_21")), "3A": fmt(f.get("score_63")), "1Y": fmt(f.get("score_252")), "Nihai Skor": fmt(f.get("final_score")), "Nihai Karar": f.get("final_decision", "-"), "Güven": f.get("confidence", "-"), "Kaynak": f.get("source", "-")} for f in calc_funds])
 st.dataframe(df_p, use_container_width=True, hide_index=True)
