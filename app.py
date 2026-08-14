@@ -15,13 +15,14 @@ from openpyxl.utils import get_column_letter
 st.set_page_config(page_title="KGDM-3 Fon Analiz Otomasyonu", page_icon="📊", layout="wide")
 
 st.title("📊 KGDM-3 Fon Analiz ve Excel Otomasyonu")
-st.caption("Dengelenmiş Z-Skor (Clipping) Algoritması | Yüksek Getiri, MaxDD Kalkanı ve Son 5 Günlük Trend Analizi.")
+st.caption("10.000 Yatırımcı Alt Sınır Filtresi | Dengelenmiş Z-Skor, MaxDD Kalkanı ve Son 5 Günlük Trend Analizi.")
 
 FUND_KINDS = ("YAT", "EMK", "BYF")
 LOOKBACK_CALENDAR_DAYS = 35
 TARGET_TRADING_DAYS = 10
+MIN_INVESTOR_COUNT = 10000  # En az yatırımcı sayısı sınırı
 HTTP_TIMEOUT = 8
-APP_VERSION = "4.7.0"
+APP_VERSION = "4.8.0"
 
 COLOR_NAVY = "1F4E79"
 COLOR_GREEN = "008000"
@@ -243,8 +244,6 @@ def zscore(values: list[float]) -> list[float]:
     std = variance ** 0.5
     
     if std < 1e-12: return [0.0 for _ in values]
-    
-    # Z-Skorları -2.5 ile +2.5 arasında sınırlandırarak (clipping) uçuşmaları engelliyoruz
     raw_z = [(float(value) - mean_value) / std for value in values]
     return [max(-2.5, min(2.5, z)) for z in raw_z]
 
@@ -397,7 +396,7 @@ st.subheader("📋 Analiz Özeti")
 summary_col1, summary_col2, summary_col3 = st.columns(3)
 with summary_col1: st.metric("Analiz Edilecek Fon", len(requested_codes))
 with summary_col2: st.metric("Hedef İşlem Günü", TARGET_TRADING_DAYS)
-with summary_col3: st.metric("Veri Penceresi", f"{LOOKBACK_CALENDAR_DAYS} gün")
+with summary_col3: st.metric("Yatırımcı Alt Sınırı", f"{MIN_INVESTOR_COUNT:,} Kişi".replace(",", "."))
 
 today = dt.date.today()
 start_date = today - dt.timedelta(days=LOOKBACK_CALENDAR_DAYS)
@@ -412,13 +411,9 @@ available_codes = set(universe["code"].astype(str).str.upper().unique()) if not 
 found_in_tefas = [code for code in requested_codes if code in available_codes]
 missing_from_tefas = [code for code in requested_codes if code not in available_codes]
 
-col1, col2, col3 = st.columns(3)
-with col1: st.metric("TEFAS'ta Bulunan", len(found_in_tefas))
-with col2: st.metric("Yedek Kaynağa Kalan", len(missing_from_tefas))
-with col3: st.metric("TEFAS Kayıt Sayısı", len(universe))
-
 calculated_funds = []
 source_errors = []
+investor_filtered_out = []
 progress = st.progress(0, text="Fonlar analiz ediliyor...")
 total_funds = len(requested_codes)
 
@@ -444,6 +439,12 @@ for index, code in enumerate(requested_codes, start=1):
         progress.progress(index / total_funds, text=f"{code} işlenemedi...")
         continue
         
+    # YATIRIMCI SAYISI 10.000'DEN AZ OLANLARI ELEME KONTROLÜ
+    if metrics["investors"] < MIN_INVESTOR_COUNT and data_source == "TEFAS":
+        investor_filtered_out.append({"code": code, "investors": metrics["investors"], "reason": f"Yatırımcı sayısı barajın altında (< {MIN_INVESTOR_COUNT:,})".replace(",", ".")})
+        progress.progress(index / total_funds, text=f"{code} yatırımcı sayısı nedeniyle elendi...")
+        continue
+
     final_valor = excel_valor_dict.get(code)
     calculated_funds.append({"code": code, "data_source": data_source, "valor": final_valor, **metrics})
     progress.progress(index / total_funds, text=f"{code} işleniyor ({index}/{total_funds})")
@@ -451,7 +452,10 @@ for index, code in enumerate(requested_codes, start=1):
 progress.empty()
 
 if not calculated_funds:
-    st.error("Hiçbir fon hesaplanamadı.")
+    st.error("10.000 yatırımcı kriterini sağlayan hiçbir fon bulunamadı.")
+    if investor_filtered_out:
+        st.subheader("🚫 Yatırımcı Sayısı Nedeniyle Elenen Fonlar")
+        st.dataframe(pd.DataFrame(investor_filtered_out), use_container_width=True, hide_index=True)
     if source_errors: st.dataframe(pd.DataFrame(source_errors), use_container_width=True)
     st.stop()
 
@@ -496,10 +500,7 @@ for d in range(1, n_days + 1):
         val = item["valor"]
         v_pen = (val * 0.5) if val is not None else 0.0
         
-        # DENGELENMİŞ (CLIPPED) Z-SKOR FORMÜLÜ:
         raw_score = 50 + 15 * z_m[i] + 20 * z_s[i] + 15 * z_c[i] + 10 * z_a[i] + 10 * z_i[i] - 15 * z_d[i] - v_pen
-        
-        # Puanların 5 ile 95 arasında yumuşak dağılması sağlanır (0 ve 100 kilitlenmesi biter)
         score = int(round(max(5.0, min(95.0, raw_score))))
         item["running_scores"].append(score)
 
@@ -577,7 +578,7 @@ def color_cells(value):
 try: styled_df = df_display.style.map(color_cells)
 except AttributeError: styled_df = df_display.style.applymap(color_cells)
 
-st.subheader("📊 KGDM-3 Fon Sonuçları (Dengelenmiş Dağılım)")
+st.subheader("📊 KGDM-3 Fon Sonuçları (10.000 Yatırımcı Filtreli)")
 st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
 strong_buy_count = sum(item["kgdm_skor"] >= 60 for item in calculated_funds)
@@ -592,6 +593,10 @@ with c2: st.metric("🟢 Asıl Liste", main_list_count)
 with c3: st.metric("🟡 Nötr", neutral_count)
 with c4: st.metric("🔴 Acil Sat", sell_count)
 
+if investor_filtered_out:
+    with st.expander(f"🚫 Yatırımcı Sayısı 10.000'den Az Olduğu İçin Elenen Fonlar ({len(investor_filtered_out)})"):
+        st.dataframe(pd.DataFrame(investor_filtered_out), use_container_width=True, hide_index=True)
+
 source_df = pd.DataFrame([{"Fon": item["code"], "Kaynak": item["data_source"]} for item in calculated_funds])
 source_distribution = source_df["Kaynak"].value_counts().rename_axis("Kaynak").reset_index(name="Fon Sayısı")
 
@@ -603,7 +608,7 @@ if source_errors:
         st.dataframe(pd.DataFrame(source_errors), use_container_width=True, hide_index=True)
 
 output = create_excel_output(wb=wb, ws_list=ws_list, calculated_funds=calculated_funds, n_days=n_days)
-st.success(f"✅ Analiz tamamlandı. {len(calculated_funds)} fon için Z-skor kırpma (clipping) ve homojen puanlama optimizasyonu uygulandı.")
+st.success(f"✅ Analiz tamamlandı. Yatırımcı sayısı 10.000'in altında olan fonlar sistem tarafından filtrelenerek dışarıda bırakıldı.")
 
 st.download_button(label="📥 Güncellenmiş Excel'i İndir", data=output, file_name="fonlar_guncel.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 st.caption(f"KGDM-3 Fon Analiz Otomasyonu v{APP_VERSION} | Analiz tarihi: {today.strftime('%d.%m.%Y')}")
