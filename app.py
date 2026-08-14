@@ -2135,40 +2135,42 @@ start_date = (
 # VERİLERİ İŞLE
 # ============================================================
 
-with st.spinner("Veriler işleniyor (Bu işlem fon sayısına göre birkaç dakika sürebilir)..."):
-    
-    # TEFAS'ın tüm piyasayı indirmesi kilitlenmeye yol açtığı için bu satırı KAPATIYORUZ:
-    # universe = fetch_tefas_universe(start_date, today)
-    
-    # Yerine boş bir veri seti tanımlıyoruz. Böylece sistem doğrudan İş Yatırım'a geçecek.
-    universe = pd.DataFrame() 
+# ============================================================
+# VERİLERİ İŞLE VE SKORLA
+# ============================================================
+
+# Spinner (dönen ikon) sadece indirme işlemi boyunca aktif kalacak
+with st.spinner("Fon verileri İş Yatırım'dan indiriliyor..."):
+    universe = pd.DataFrame() # TEFAS yerine doğrudan İş Yatırım
+    calculated_funds, failed_codes = [], []
 
     progress_bar = st.progress(0)
     status_text = st.empty()
     total_funds = len(requested_codes)
 
-    calculated_funds, failed_codes = [], []
-
     for i, code in enumerate(requested_codes):
-        status_text.text(f"İndiriliyor ve Analiz Ediliyor: {code} ({i+1}/{total_funds})")
+        status_text.text(f"İndiriliyor: {code} ({i+1}/{total_funds})")
         
         series = None
         source = "Bulunamadı"
 
         if not universe.empty:
             series = get_fund_series(universe, code)
-            if series is not None:
-                source = "TEFAS"
+            if series is not None: source = "TEFAS"
 
         if series is None:
             series = fetch_isyatirim_series(code)
-            if series is not None:
-                source = "İş Yatırım"
+            if series is not None: source = "İş Yatırım"
 
         metrics = compute_fund_metrics(series)
         if metrics:
             metrics.update({"code": code, "source": source, "valor": valor_map.get(code, 0.0)})
-            metrics["filtered_out"] = not ((metrics["aum"] >= min_aum if metrics["aum"] > 0 else True) and (metrics["investors"] >= min_investors if metrics["investors"] > 0 else True))
+            
+            # Filtreleme (Sıfır ise takılmasın diye kontrol)
+            aum_ok = metrics["aum"] >= min_aum if metrics.get("aum", 0) > 0 else True
+            inv_ok = metrics["investors"] >= min_investors if metrics.get("investors", 0) > 0 else True
+            metrics["filtered_out"] = not (aum_ok and inv_ok)
+            
             calculated_funds.append(metrics)
         else: 
             failed_codes.append(code)
@@ -2178,742 +2180,137 @@ with st.spinner("Veriler işleniyor (Bu işlem fon sayısına göre birkaç daki
     status_text.empty()
     progress_bar.empty()
 
-    universe = fetch_tefas_universe(
-        start_date,
-        today,
-    )
-
-    calculated_funds = []
-    failed_codes = []
-
-    for code in requested_codes:
-
-        if not universe.empty:
-
-            series = get_fund_series(
-                universe,
-                code,
-            )
-
-            source = (
-                "TEFAS"
-                if series is not None
-                else "Bulunamadı"
-            )
-
-        else:
-
-            series = None
-            source = "Bulunamadı"
-
-        # ----------------------------------------------------
-        # İş Yatırım fallback
-        # ----------------------------------------------------
-
-        if series is None:
-
-            series = (
-                fetch_isyatirim_series(
-                    code
-                )
-            )
-
-            if series is not None:
-                source = "İş Yatırım"
-
-        metrics = compute_fund_metrics(
-            series
-        )
-
-        if metrics:
-
-            metrics.update(
-                {
-                    "code": code,
-                    "source": source,
-                    "valor": valor_map.get(
-                        code,
-                        0.0,
-                    ),
-                }
-            )
-
-            aum_ok = (
-                metrics["aum"]
-                >= min_aum
-                if metrics["aum"] > 0
-                else True
-            )
-
-            investor_ok = (
-                metrics["investors"]
-                >= min_investors
-                if metrics["investors"] > 0
-                else True
-            )
-
-            metrics[
-                "filtered_out"
-            ] = not (
-                aum_ok
-                and investor_ok
-            )
-
-            calculated_funds.append(
-                metrics
-            )
-
-        else:
-
-            failed_codes.append(code)
-
-
-# ============================================================
-# UYARILAR
-# ============================================================
+# ---- İNDİRME BİTTİ, ŞİMDİ ADIM ADIM BİLGİLENDİRME ----
+st.success(f"✅ {len(calculated_funds)} fonun verisi başarıyla indirildi. Skorlamaya geçiliyor...")
 
 if failed_codes:
+    st.warning("⚠️ Veri bulunamayan fonlar: " + ", ".join(failed_codes))
 
-    st.warning(
-        "Veri bulunamayan fonlar: "
-        + ", ".join(failed_codes)
-    )
-
-
-# ============================================================
-# VADE SKORLARI
-# ============================================================
-
+# 1. Aşama: Z-Skorları
+st.info("🔄 Vade skorları hesaplanıyor...")
 for period_days in PERIODS.values():
+    calculate_period_scores(calculated_funds, period_days, daily_rf, use_category_scoring)
 
-    calculate_period_scores(
-        calculated_funds,
-        period_days,
-        daily_rf,
-        use_category_scoring,
-    )
+# 2. Aşama: KUT Benchmark (YAHOO FINANCE - EN ÇOK TAKILAN YER)
+if any(item["code"] == "KUT" for item in calculated_funds):
+    st.info("🌐 KUT Benchmark verisi Yahoo'dan çekiliyor (Altın/Gümüş/Dolar). Bu işlem 30-45 saniye sürebilir...")
+    kut_benchmark = fetch_kut_benchmark(start_date, today)
+    if kut_benchmark is None or kut_benchmark.empty:
+        st.warning("⚠️ Yahoo Finance verisi alınamadı! KUT sadece kendi skorlarıyla değerlendirilecek.")
+    calculate_kut_benchmark_metrics(calculated_funds, kut_benchmark)
 
+# 3. Aşama: Trend ve Nihai Skorlar
+st.info("🔄 Trend ve Güven Analizleri yapılıyor...")
+calculate_trends(calculated_funds)
+calculate_final_scores(calculated_funds)
 
-# ============================================================
-# KUT BENCHMARK
-# ============================================================
+# Sıralama
+calculated_funds.sort(key=lambda x: (x.get("final_score") if x.get("final_score") is not None else -1), reverse=True)
 
-if any(
-    item["code"] == "KUT"
-    for item in calculated_funds
-):
-
-    kut_benchmark = (
-        fetch_kut_benchmark(
-            start_date,
-            today,
-        )
-    )
-
-    calculate_kut_benchmark_metrics(
-        calculated_funds,
-        kut_benchmark,
-    )
-
-
-# ============================================================
-# TREND + NİHAİ SKOR
-# ============================================================
-
-calculate_trends(
-    calculated_funds
-)
-
-calculate_final_scores(
-    calculated_funds
-)
-
-
-# ============================================================
-# SIRALAMA
-# ============================================================
-
-calculated_funds.sort(
-    key=lambda x: (
-        x.get("final_score")
-        if x.get("final_score")
-        is not None
-        else -1
-    ),
-    reverse=True,
-)
-
-
-# ============================================================
-# EXCEL ÇIKTISI
-# ============================================================
+# 4. Aşama: Excel Oluşturma
+st.info("📊 Excel dosyası oluşturuluyor...")
 
 if "Vade_Analizi" in wb.sheetnames:
-
     del wb["Vade_Analizi"]
 
-
-ws_out = wb.create_sheet(
-    "Vade_Analizi",
-    0,
-)
-
+ws_out = wb.create_sheet("Vade_Analizi", 0)
 
 headers = [
-    "Fon Kodu",
-    "Kategori",
-    "AUM (TL)",
-    "Yatırımcı",
-
-    "1H Skor",
-    "1H Karar",
-    "1H Küm %",
-    "1H MDD %",
-    "1H Valor Ceza",
-
-    "1A Skor",
-    "1A Karar",
-    "1A Küm %",
-    "1A MDD %",
-    "1A Valor Ceza",
-
-    "3A Skor",
-    "3A Karar",
-    "3A Küm %",
-    "3A MDD %",
-    "3A Valor Ceza",
-
-    "1Y Skor",
-    "1Y Karar",
-    "1Y Küm %",
-    "1Y MDD %",
-    "1Y Valor Ceza",
-
-    "1Y Trend",
-    "3A Trend",
-    "Güven Seviyesi",
-
-    "Nihai Skor",
-    "Nihai Karar",
-
-    "Benchmark 1H",
-    "KUT-Bench 1H",
-
-    "Benchmark 1A",
-    "KUT-Bench 1A",
-
-    "Benchmark 3A",
-    "KUT-Bench 3A",
-
-    "Benchmark 1Y",
-    "KUT-Bench 1Y",
-
-    "Benchmark Ort. Skor",
-
-    "Kaynak",
+    "Fon Kodu", "Kategori", "AUM (TL)", "Yatırımcı",
+    "1H Skor", "1H Karar", "1H Küm %", "1H MDD %", "1H Valor Ceza",
+    "1A Skor", "1A Karar", "1A Küm %", "1A MDD %", "1A Valor Ceza",
+    "3A Skor", "3A Karar", "3A Küm %", "3A MDD %", "3A Valor Ceza",
+    "1Y Skor", "1Y Karar", "1Y Küm %", "1Y MDD %", "1Y Valor Ceza",
+    "1Y Trend", "3A Trend", "Güven Seviyesi",
+    "Nihai Skor", "Nihai Karar",
+    "Benchmark 1H", "KUT-Bench 1H",
+    "Benchmark 1A", "KUT-Bench 1A",
+    "Benchmark 3A", "KUT-Bench 3A",
+    "Benchmark 1Y", "KUT-Bench 1Y",
+    "Benchmark Ort. Skor", "Kaynak",
 ]
-
-
 ws_out.append(headers)
 
-
-# ============================================================
-# EXCEL BAŞLIK
-# ============================================================
-
+# Excel Başlık Formatı
 for cell in ws_out[1]:
+    cell.fill = PatternFill(start_color=COLOR_NAVY, fill_type="solid")
+    cell.font = Font(color=COLOR_WHITE, bold=True)
+    cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
-    cell.fill = PatternFill(
-        start_color=COLOR_NAVY,
-        fill_type="solid",
-    )
+def fmt(val): return val if val is not None else "-"
 
-    cell.font = Font(
-        color=COLOR_WHITE,
-        bold=True,
-    )
-
-    cell.alignment = Alignment(
-        horizontal="center",
-        vertical="center",
-        wrap_text=True,
-    )
-
-
-def fmt(val):
-
-    return (
-        val
-        if val is not None
-        else "-"
-    )
-
-
-# ============================================================
-# EXCEL SATIRLARI
-# ============================================================
-
+# Excel Satırlarını Doldur
 for item in calculated_funds:
-
     b_scores = [
-        item.get(
-            f"benchmark_score_{d}"
-        )
-        for d in PERIODS.values()
-        if item.get(
-            f"benchmark_score_{d}"
-        ) is not None
+        item.get(f"benchmark_score_{d}") for d in PERIODS.values()
+        if item.get(f"benchmark_score_{d}") is not None
     ]
-
-    benchmark_avg = (
-        round(
-            sum(b_scores)
-            / len(b_scores),
-            1,
-        )
-        if b_scores
-        else "-"
-    )
-
-    ws_out.append(
-        [
-            item["code"],
-            item.get(
-                "category",
-                "-",
-            ),
-            fmt(
-                item.get("aum")
-            ),
-            fmt(
-                item.get(
-                    "investors"
-                )
-            ),
-
-            fmt(
-                item.get("score_5")
-            ),
-            item.get(
-                "karar_5",
-                "-",
-            ),
-            fmt(
-                item.get("cum_5")
-            ),
-            fmt(
-                item.get("mdd_5")
-            ),
-            fmt(
-                item.get(
-                    "valor_penalty_5"
-                )
-            ),
-
-            fmt(
-                item.get("score_21")
-            ),
-            item.get(
-                "karar_21",
-                "-",
-            ),
-            fmt(
-                item.get("cum_21")
-            ),
-            fmt(
-                item.get("mdd_21")
-            ),
-            fmt(
-                item.get(
-                    "valor_penalty_21"
-                )
-            ),
-
-            fmt(
-                item.get("score_63")
-            ),
-            item.get(
-                "karar_63",
-                "-",
-            ),
-            fmt(
-                item.get("cum_63")
-            ),
-            fmt(
-                item.get("mdd_63")
-            ),
-            fmt(
-                item.get(
-                    "valor_penalty_63"
-                )
-            ),
-
-            fmt(
-                item.get("score_252")
-            ),
-            item.get(
-                "karar_252",
-                "-",
-            ),
-            fmt(
-                item.get("cum_252")
-            ),
-            fmt(
-                item.get("mdd_252")
-            ),
-            fmt(
-                item.get(
-                    "valor_penalty_252"
-                )
-            ),
-
-            item.get(
-                "trend_1y",
-                "-",
-            ),
-
-            item.get(
-                "trend_3a",
-                "-",
-            ),
-
-            item.get(
-                "confidence",
-                "-",
-            ),
-
-            fmt(
-                item.get(
-                    "final_score"
-                )
-            ),
-
-            item.get(
-                "final_decision",
-                "-",
-            ),
-
-            fmt(
-                item.get(
-                    "benchmark_5"
-                )
-            ),
-
-            fmt(
-                item.get(
-                    "benchmark_diff_5"
-                )
-            ),
-
-            fmt(
-                item.get(
-                    "benchmark_21"
-                )
-            ),
-
-            fmt(
-                item.get(
-                    "benchmark_diff_21"
-                )
-            ),
-
-            fmt(
-                item.get(
-                    "benchmark_63"
-                )
-            ),
-
-            fmt(
-                item.get(
-                    "benchmark_diff_63"
-                )
-            ),
-
-            fmt(
-                item.get(
-                    "benchmark_252"
-                )
-            ),
-
-            fmt(
-                item.get(
-                    "benchmark_diff_252"
-                )
-            ),
-
-            benchmark_avg,
-
-            item.get(
-                "source",
-                "-",
-            ),
-        ]
-    )
-
-
-# ============================================================
-# EXCEL RENKLERİ
-# ============================================================
-
-green = Font(
-    color=COLOR_GREEN,
-    bold=True,
-)
-
-red = Font(
-    color=COLOR_RED,
-    bold=True,
-)
-
-yellow = Font(
-    color=COLOR_YELLOW,
-    bold=True,
-)
-
-
-decision_columns = [
-    6,
-    11,
-    16,
-    21,
-    29,
-]
-
-
-for row in range(
-    2,
-    ws_out.max_row + 1,
-):
-
-    # Kararlar
-    for col in decision_columns:
-
-        v = str(
-            ws_out.cell(
-                row=row,
-                column=col,
-            ).value
-        )
-
-        if any(
-            x in v
-            for x in [
-                "GÜÇLÜ AL",
-                "AL",
-                "LİSTE",
-            ]
-        ):
-
-            ws_out.cell(
-                row=row,
-                column=col,
-            ).font = green
-
-        elif "NÖTR" in v:
-
-            ws_out.cell(
-                row=row,
-                column=col,
-            ).font = yellow
-
-        elif any(
-            x in v
-            for x in [
-                "SAT",
-                "ACİL",
-                "FİLTRE",
-            ]
-        ):
-
-            ws_out.cell(
-                row=row,
-                column=col,
-            ).font = red
-
-    # Trend
-    for col in [25, 26]:
-
-        v = str(
-            ws_out.cell(
-                row=row,
-                column=col,
-            ).value
-        )
-
-        if "YUKARI" in v:
-
-            ws_out.cell(
-                row=row,
-                column=col,
-            ).font = green
-
-        elif "AŞAĞI" in v:
-
-            ws_out.cell(
-                row=row,
-                column=col,
-            ).font = red
-
-        elif "YATAY" in v:
-
-            ws_out.cell(
-                row=row,
-                column=col,
-            ).font = yellow
-
-    # Güven
-    c_conf = ws_out.cell(
-        row=row,
-        column=27,
-    )
-
-    if c_conf.value in [
-        "ÇOK YÜKSEK",
-        "YÜKSEK",
-    ]:
-
-        c_conf.font = green
-
-    elif c_conf.value == "ORTA":
-
-        c_conf.font = yellow
-
-    else:
-
-        c_conf.font = red
-
-    # Nihai skor
-    c_fin = ws_out.cell(
-        row=row,
-        column=28,
-    )
-
-    if isinstance(
-        c_fin.value,
-        (int, float),
-    ):
-
-        if c_fin.value >= 70:
-
-            c_fin.fill = PatternFill(
-                start_color=COLOR_LIGHT_GREEN,
-                fill_type="solid",
-            )
-
-        elif c_fin.value >= 45:
-
-            c_fin.fill = PatternFill(
-                start_color=COLOR_LIGHT_YELLOW,
-                fill_type="solid",
-            )
-
-        else:
-
-            c_fin.fill = PatternFill(
-                start_color=COLOR_LIGHT_RED,
-                fill_type="solid",
-            )
-
-
-# ============================================================
-# EXCEL SAYI FORMATLARI
-# ============================================================
-
-percentage_columns = [
-    7,
-    8,
-    9,
-
-    12,
-    13,
-    14,
-
-    17,
-    18,
-    19,
-
-    22,
-    23,
-    24,
-
-    30,
-    31,
-    32,
-    33,
-    34,
-    35,
-    36,
-    37,
-]
-
-
-for row in range(
-    2,
-    ws_out.max_row + 1,
-):
-
+    benchmark_avg = round(sum(b_scores) / len(b_scores), 1) if b_scores else "-"
+
+    ws_out.append([
+        item["code"], item.get("category", "-"), fmt(item.get("aum")), fmt(item.get("investors")),
+        fmt(item.get("score_5")), item.get("karar_5", "-"), fmt(item.get("cum_5")), fmt(item.get("mdd_5")), fmt(item.get("valor_penalty_5")),
+        fmt(item.get("score_21")), item.get("karar_21", "-"), fmt(item.get("cum_21")), fmt(item.get("mdd_21")), fmt(item.get("valor_penalty_21")),
+        fmt(item.get("score_63")), item.get("karar_63", "-"), fmt(item.get("cum_63")), fmt(item.get("mdd_63")), fmt(item.get("valor_penalty_63")),
+        fmt(item.get("score_252")), item.get("karar_252", "-"), fmt(item.get("cum_252")), fmt(item.get("mdd_252")), fmt(item.get("valor_penalty_252")),
+        item.get("trend_1y", "-"), item.get("trend_3a", "-"), item.get("confidence", "-"),
+        fmt(item.get("final_score")), item.get("final_decision", "-"),
+        fmt(item.get("benchmark_5")), fmt(item.get("benchmark_diff_5")),
+        fmt(item.get("benchmark_21")), fmt(item.get("benchmark_diff_21")),
+        fmt(item.get("benchmark_63")), fmt(item.get("benchmark_diff_63")),
+        fmt(item.get("benchmark_252")), fmt(item.get("benchmark_diff_252")),
+        benchmark_avg, item.get("source", "-"),
+    ])
+
+# Excel Renkleri
+green = Font(color=COLOR_GREEN, bold=True)
+red = Font(color=COLOR_RED, bold=True)
+yellow = Font(color=COLOR_YELLOW, bold=True)
+
+for row in range(2, ws_out.max_row + 1):
+    for col in [6, 11, 16, 21, 29]: # Kararlar
+        v = str(ws_out.cell(row=row, column=col).value)
+        if any(x in v for x in ["GÜÇLÜ AL", "AL", "LİSTE"]): ws_out.cell(row=row, column=col).font = green
+        elif "NÖTR" in v: ws_out.cell(row=row, column=col).font = yellow
+        elif any(x in v for x in ["SAT", "ACİL", "FİLTRE"]): ws_out.cell(row=row, column=col).font = red
+
+    for col in [25, 26]: # Trendler
+        v = str(ws_out.cell(row=row, column=col).value)
+        if "YUKARI" in v: ws_out.cell(row=row, column=col).font = green
+        elif "AŞAĞI" in v: ws_out.cell(row=row, column=col).font = red
+        elif "YATAY" in v: ws_out.cell(row=row, column=col).font = yellow
+
+    c_conf = ws_out.cell(row=row, column=27) # Güven
+    if c_conf.value in ["ÇOK YÜKSEK", "YÜKSEK"]: c_conf.font = green
+    elif c_conf.value == "ORTA": c_conf.font = yellow
+    else: c_conf.font = red
+
+    c_fin = ws_out.cell(row=row, column=28) # Nihai Skor
+    if isinstance(c_fin.value, (int, float)):
+        if c_fin.value >= 70: c_fin.fill = PatternFill(start_color=COLOR_LIGHT_GREEN, fill_type="solid")
+        elif c_fin.value >= 45: c_fin.fill = PatternFill(start_color=COLOR_LIGHT_YELLOW, fill_type="solid")
+        else: c_fin.fill = PatternFill(start_color=COLOR_LIGHT_RED, fill_type="solid")
+
+# Excel Yüzdeler ve Genişlik
+percentage_columns = [7, 8, 9, 12, 13, 14, 17, 18, 19, 22, 23, 24, 30, 31, 32, 33, 34, 35, 36, 37]
+for row in range(2, ws_out.max_row + 1):
     for col in percentage_columns:
-
-        cell = ws_out.cell(
-            row=row,
-            column=col,
-        )
-
-        if isinstance(
-            cell.value,
-            (int, float),
-        ):
-
-            cell.number_format = (
-                '0.00"%"'
-            )
-
-
-# ============================================================
-# KOLON GENİŞLİKLERİ
-# ============================================================
+        cell = ws_out.cell(row=row, column=col)
+        if isinstance(cell.value, (int, float)): cell.number_format = '0.00"%"'
 
 for col in ws_out.columns:
-
     max_len = 0
-
     for cell in col:
-
-        try:
-            max_len = max(
-                max_len,
-                len(str(cell.value)),
-            )
-        except Exception:
-            pass
-
-    letter = get_column_letter(
-        col[0].column
-    )
-
-    ws_out.column_dimensions[
-        letter
-    ].width = min(
-        max(max_len + 2, 11),
-        26,
-    )
-
+        try: max_len = max(max_len, len(str(cell.value)))
+        except: pass
+    ws_out.column_dimensions[get_column_letter(col[0].column)].width = min(max(max_len + 2, 11), 26)
 
 ws_out.freeze_panes = "B2"
+ws_out.auto_filter.ref = ws_out.dimensions
 
-ws_out.auto_filter.ref = (
-    ws_out.dimensions
-)
-
-
-# ============================================================
-# DOSYAYI OLUŞTUR
-# ============================================================
-
+# Dosyayı kaydet
 output = io.BytesIO()
-
 wb.save(output)
-
 output.seek(0)
 
 
