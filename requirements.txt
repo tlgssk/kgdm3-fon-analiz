@@ -3,3 +3,4 @@ pandas
 openpyxl
 tefas-crawler
 pytefas
+requests
