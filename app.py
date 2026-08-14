@@ -2135,9 +2135,38 @@ start_date = (
 # VERİLERİ İŞLE
 # ============================================================
 
-with st.spinner(
-    "Veriler işleniyor..."
-):
+with st.spinner("Veriler işleniyor (Bu işlem fon sayısına göre birkaç dakika sürebilir)..."):
+    universe = fetch_tefas_universe(start_date, today)
+    calculated_funds, failed_codes = [], []
+
+    # İlerleme Çubuğu ve Durum Metni (YENİ EKLENEN KISIM)
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    total_funds = len(requested_codes)
+
+    for i, code in enumerate(requested_codes):
+        # Ekrana hangi fonun çekildiğini yazdır
+        status_text.text(f"İndiriliyor ve Analiz Ediliyor: {code} ({i+1}/{total_funds})")
+        
+        series, source = get_fund_series(universe, code) if not universe.empty else None, "TEFAS" if not universe.empty else "Bulunamadı"
+        if series is None:
+            series = fetch_isyatirim_series(code)
+            if series is not None: source = "İş Yatırım"
+
+        metrics = compute_fund_metrics(series)
+        if metrics:
+            metrics.update({"code": code, "source": source, "valor": valor_map.get(code, 0.0)})
+            metrics["filtered_out"] = not ((metrics["aum"] >= min_aum if metrics["aum"] > 0 else True) and (metrics["investors"] >= min_investors if metrics["investors"] > 0 else True))
+            calculated_funds.append(metrics)
+        else: 
+            failed_codes.append(code)
+            
+        # İlerleme çubuğunu güncelle
+        progress_bar.progress((i + 1) / total_funds)
+        
+    # İşlem bitince çubuğu ve yazıyı temizle
+    status_text.empty()
+    progress_bar.empty()
 
     universe = fetch_tefas_universe(
         start_date,
