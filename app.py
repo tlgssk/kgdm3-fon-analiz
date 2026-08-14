@@ -16,13 +16,13 @@ from openpyxl.utils import get_column_letter
 st.set_page_config(page_title="KGDM-3 Fon Analiz Otomasyonu", page_icon="📊", layout="wide")
 
 st.title("📊 KGDM-3 Fon Analiz ve Excel Otomasyonu")
-st.caption("Dinamik Kriter Paneli | Haftalık Getiri ve 1.000'er Katlı Yatırımcı Eşiği Entegreli Analiz Motoru.")
+st.caption("Dinamik Kriter Paneli | %0.50'den Başlayan 0.10 Artışlı Haftalık Getiri ve 1.000'er Katlı Yatırımcı Eşiği.")
 
 FUND_KINDS = ("YAT", "EMK", "BYF")
 LOOKBACK_CALENDAR_DAYS = 35
 TARGET_TRADING_DAYS = 10
 HTTP_TIMEOUT = 8
-APP_VERSION = "5.1.0"
+APP_VERSION = "5.2.0"
 
 # GITHUB ÜZERİNDEKİ EXCEL DOSYANIZIN RAW LİNKİNİ BURAYA YAPIŞTIRIN:
 GITHUB_EXCEL_URL = "https://github.com/tlgssk/kgdm3-fon-analiz/raw/refs/heads/main/Menkul_Kiymet_Yatirim_Fonlari_EXCEL_Tum_Veri_2026-08-14.xlsx"
@@ -39,14 +39,15 @@ COLOR_LIGHT_YELLOW = "FFF2CC"
 # --- KULLANICI KONTROL PANELİ (KENAR ÇUBUĞU) ---
 st.sidebar.header("⚙️ Analiz Kriterleri")
 
-# 1er 1er artan haftalık getiri hedefi (%)
+# %0.50'den başlayıp 0.10'ar artan hassas haftalık getiri hedefi (%)
 TARGET_WEEKLY_RETURN = st.sidebar.slider(
     "Hedef Haftalık Getiri (%)",
-    min_value=1.0,
-    max_value=10.0,
-    value=1.0,
-    step=1.0,
-    help="Fonların analizde baz alınacak minimum haftalık getiri beklentisi (1'er artar)."
+    min_value=0.50,
+    max_value=10.00,
+    value=1.00,
+    step=0.10,
+    format="%%.2f",
+    help="Fonların analizde baz alınacak minimum haftalık getiri beklentisi (%0.50'den başlar, 0.10 artar)."
 )
 
 # 1000 ve katları şeklinde seçilebilen yatırımcı alt sınırı
@@ -264,8 +265,6 @@ def compute_fund_metrics(series: Optional[pd.DataFrame], fund_code: str) -> Opti
     inv_change = ((investors[-1] - investors[0]) / investors[0] * 100) if investors[0] > 0 else 0.0
 
     allocation = fetch_fintables_asset_allocation(fund_code)
-
-    # Son 5 günlük haftalık getiri toplamı tahmini
     recent_weekly_ret = sum(daily_returns[-5:]) if len(daily_returns) >= 5 else sum(daily_returns)
 
     return {
@@ -470,7 +469,7 @@ summary_col1, summary_col2, summary_col3, summary_col4 = st.columns(4)
 with summary_col1: st.metric("Analiz Edilecek Fon", len(requested_codes))
 with summary_col2: st.metric("Hedef İşlem Günü", TARGET_TRADING_DAYS)
 with summary_col3: st.metric("Yatırımcı Alt Sınırı", f"{MIN_INVESTOR_COUNT:,} Kişi".replace(",", "."))
-with summary_col4: st.metric("Hedef Haftalık Getiri", f"%{TARGET_WEEKLY_RETURN:.1f}")
+with summary_col4: st.metric("Hedef Haftalık Getiri", f"%{TARGET_WEEKLY_RETURN:.2f}")
 
 today = dt.date.today()
 start_date = today - dt.timedelta(days=LOOKBACK_CALENDAR_DAYS)
@@ -520,9 +519,9 @@ for index, code in enumerate(requested_codes, start=1):
         progress.progress(index / total_funds, text=f"{code} yatırımcı sayısı nedeniyle elendi...")
         continue
 
-    # 2. Kriter: Hedef Haftalık Getiri Filtresi (%1 ve katları)
+    # 2. Kriter: Hassas Haftalık Getiri Filtresi (%0.50 ve 0.10 artışlar)
     if metrics["weekly_return"] < TARGET_WEEKLY_RETURN:
-        return_filtered_out.append({"code": code, "weekly_return": round(metrics["weekly_return"], 2), "reason": f"Haftalık getiri hedefinin altında (< %{TARGET_WEEKLY_RETURN:.1f})"})
+        return_filtered_out.append({"code": code, "weekly_return": round(metrics["weekly_return"], 2), "reason": f"Haftalık getiri hedefinin altında (< %{TARGET_WEEKLY_RETURN:.2f})"})
         progress.progress(index / total_funds, text=f"{code} haftalık getiri hedefi nedeniyle elendi...")
         continue
 
@@ -664,7 +663,7 @@ def color_cells(value):
 try: styled_df = df_display.style.map(color_cells)
 except AttributeError: styled_df = df_display.style.applymap(color_cells)
 
-st.subheader("📊 KGDM-3 Fon Sonuçları (Dinamik Kriter Filtreli)")
+st.subheader("📊 KGDM-3 Fon Sonuçları (Hassas Getiri Filtreli)")
 st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
 strong_buy_count = sum(item["kgdm_skor"] >= 60 for item in calculated_funds)
@@ -699,7 +698,7 @@ if source_errors:
         st.dataframe(pd.DataFrame(source_errors), use_container_width=True, hide_index=True)
 
 output = create_excel_output(wb=wb, ws_list=ws_list, calculated_funds=calculated_funds, n_days=n_days)
-st.success(f"✅ Analiz tamamlandı. (Hedef Getirisi: %{TARGET_WEEKLY_RUN := TARGET_WEEKLY_RETURN:.1f}, Min Yatırımcı: {MIN_INVESTOR_COUNT:,})".replace(",", "."))
+st.success(f"✅ Analiz tamamlandı. (Hedef Getiri: %{TARGET_WEEKLY_RETURN:.2f}, Min Yatırımcı: {MIN_INVESTOR_COUNT:,})".replace(",", "."))
 
 st.download_button(label="📥 Güncellenmiş Excel'i İndir", data=output, file_name="fonlar_guncel.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 st.caption(f"KGDM-3 Fon Analiz Otomasyonu v{APP_VERSION} | Analiz tarihi: {today.strftime('%d.%m.%Y')}")
