@@ -15,13 +15,13 @@ from openpyxl.utils import get_column_letter
 st.set_page_config(page_title="KGDM-3 Fon Analiz Otomasyonu", page_icon="📊", layout="wide")
 
 st.title("📊 KGDM-3 Fon Analiz ve Excel Otomasyonu")
-st.caption("Veri şelalesi ile fonları analiz eder. Son 10 günün her birisi için ayrı ayrı tam kapsamlı KGDM-3 puanı hesaplar.")
+st.caption("Veri şelalesi ile fonları analiz eder. Son 3 günlük trend ve kazanç/kayıp durumu dahil güncellenmiş KGDM-3 puanı hesaplar.")
 
 FUND_KINDS = ("YAT", "EMK", "BYF")
 LOOKBACK_CALENDAR_DAYS = 35
 TARGET_TRADING_DAYS = 10
 HTTP_TIMEOUT = 8
-APP_VERSION = "4.1.0"
+APP_VERSION = "4.2.0"
 
 COLOR_NAVY = "1F4E79"
 COLOR_GREEN = "008000"
@@ -62,16 +62,6 @@ def normalize_fund_code(value) -> str:
     code = str(value).strip().upper()
     if code.endswith(".0"): code = code[:-2]
     return code
-
-def format_money(value) -> str:
-    number = parse_number(value)
-    if number is None: return "-"
-    return f"{number:,.0f} ₺".replace(",", ".")
-
-def format_integer(value) -> str:
-    number = parse_number(value)
-    if number is None: return "-"
-    return f"{int(round(number)):,}".replace(",", ".")
 
 def format_percent(value) -> str:
     number = parse_number(value)
@@ -274,7 +264,11 @@ def create_excel_output(wb, ws_list, calculated_funds, n_days) -> io.BytesIO:
     ws_scores = wb.create_sheet(title="KGDM3_Puanlama")
     
     day_labels = calculated_funds[0]["dates"]
-    headers = ["Fon Kodu", "Valör (Excel)", "KGDM-3 Skor", "Model Kararı", "Ort. Getiri (%)", "Volatilite (%)", "Sharpe", "Kümülatif Getiri (%)", "Fon Büyüklüğü (AUM ₺)", "Yatırımcı Sayısı", "Fiyat Kaynağı"]
+    headers = [
+        "Fon Kodu", "Valör (Excel)", "KGDM-3 Skor (Ort3)", "Son 3 Gün Skorlar", "3 Günlük Trend", 
+        "Model Kararı", "Ort. Getiri (%)", "Volatilite (%)", "Sharpe", "Kümülatif Getiri (%)", 
+        "Fon Büyüklüğü (AUM ₺)", "Yatırımcı Sayısı", "Fiyat Kaynağı"
+    ]
     for day in day_labels: headers.append(f"{day} Skor")
     for day in day_labels: headers.append(f"{day} % Getiri")
     ws_scores.append(headers)
@@ -291,17 +285,24 @@ def create_excel_output(wb, ws_list, calculated_funds, n_days) -> io.BytesIO:
         row_data = [
             item["code"],
             item["valor"] if item["valor"] is not None else None,
-            item["kgdm_skor"], item["karar"], round(item["mean_return"], 4), round(item["volatility"], 4),
-            round(item["sharpe_like"], 4), round(item["cumulative_return"], 4),
+            item["kgdm_skor"], 
+            item["last_3_scores_str"],
+            item["trend_status"],
+            item["karar"], 
+            round(item["mean_return"], 4), 
+            round(item["volatility"], 4),
+            round(item["sharpe_like"], 4), 
+            round(item["cumulative_return"], 4),
             round(item["aum"], 2) if item["aum"] else None,
-            int(item["investors"]) if item["investors"] else None, item["data_source"]
+            int(item["investors"]) if item["investors"] else None, 
+            item["data_source"]
         ]
         row_data.extend(item["running_scores"])
         row_data.extend([format_percent(value) for value in item["daily_returns"]])
         ws_scores.append(row_data)
         
-    COL_VALOR = 2; COL_SCORE = 3; COL_DECISION = 4; COL_MEAN = 5; COL_VOL = 6; COL_SHARPE = 7; COL_CUM = 8; COL_AUM = 9; COL_INVESTORS = 10
-    SCORE_START = 12
+    COL_VALOR = 2; COL_SCORE = 3; COL_DECISION = 6; COL_MEAN = 7
+    SCORE_START = 14
     RETURN_START = SCORE_START + n_days
     
     green_font = Font(bold=True, color=COLOR_GREEN)
@@ -309,10 +310,9 @@ def create_excel_output(wb, ws_list, calculated_funds, n_days) -> io.BytesIO:
     yellow_font = Font(bold=True, color=COLOR_YELLOW)
     
     for row_number in range(2, ws_scores.max_row + 1):
-        ws_scores.cell(row=row_number, column=COL_AUM).number_format = '#,##0.00 "₺"'
-        ws_scores.cell(row=row_number, column=COL_INVESTORS).number_format = '#,##0'
+        ws_scores.cell(row=row_number, column=9).number_format = '#,##0.00 "₺"' # AUM
+        ws_scores.cell(row=row_number, column=10).number_format = '#,##0' # Yatırımcı
         ws_scores.cell(row=row_number, column=COL_VALOR).number_format = '0'
-        for col in [COL_MEAN, COL_VOL, COL_SHARPE, COL_CUM]: ws_scores.cell(row=row_number, column=col).number_format = '0.0000'
         ws_scores.cell(row=row_number, column=COL_SCORE).number_format = '0'
         
         decision_cell = ws_scores.cell(row=row_number, column=COL_DECISION)
@@ -484,39 +484,75 @@ for d in range(1, n_days + 1):
         raw_score = 50 + 15 * z_m[i] + 20 * z_s[i] + 15 * z_c[i] - v_pen
         score = int(round(max(0.0, min(100.0, raw_score))))
         item["running_scores"].append(score)
-        
-        if d == n_days:
-            item["kgdm_skor"] = score
-            if score >= 60: item["karar"] = "GÜÇLÜ AL (≥60 Puan)"; item["karar_sira"] = 1
-            elif score >= 40: item["karar"] = "ASIL LİSTE (40-59 Puan)"; item["karar_sira"] = 2
-            elif score >= 25: item["karar"] = "NÖTR / İZLEME (25-39 Puan)"; item["karar_sira"] = 3
-            else: item["karar"] = "ACİL SAT (<25 Puan)"; item["karar_sira"] = 4
+
+# SON 3 GÜN SKORLARI, TREND VE KAZANÇ/KAYIP DURUMU ENTEGRASYONU
+for item in calculated_funds:
+    scores = item["running_scores"]
+    if len(scores) >= 3:
+        last_3 = scores[-3:]
+    else:
+        last_3 = scores
+    
+    # Son 3 günün ortalaması nihai skor olarak baz alınır (veya ağırlıklandırılır)
+    avg_score_3d = sum(last_3) / len(last_3)
+    item["kgdm_skor"] = int(round(avg_score_3d))
+    
+    # Metin gösterimleri
+    item["last_3_scores_str"] = " ➔ ".join([str(s) for s in last_3])
+    
+    # 3 Günlük Momentum / Kazanç-Kayıp Durumu Tespiti
+    recent_returns = item["daily_returns"][-3:] if len(item["daily_returns"]) >= 3 else item["daily_returns"]
+    recent_cum_return = sum(recent_returns)
+    
+    if len(last_3) >= 2:
+        if last_3[-1] > last_3[0] and recent_cum_return > 0:
+            item["trend_status"] = "📈 Yükselişte (Kazançlı)"
+        elif last_3[-1] < last_3[0] and recent_cum_return < 0:
+            item["trend_status"] = "📉 Düşüşte (Kayıplı)"
+        else:
+            item["trend_status"] = "➡️ Yatay / Kararsız"
+    else:
+            item["trend_status"] = "➡️ Veri Sınırlı"
+
+    score = item["kgdm_skor"]
+    if score >= 60: item["karar"] = "GÜÇLÜ AL (≥60 Puan)"; item["karar_sira"] = 1
+    elif score >= 40: item["karar"] = "ASIL LİSTE (40-59 Puan)"; item["karar_sira"] = 2
+    elif score >= 25: item["karar"] = "NÖTR / İZLEME (25-39 Puan)"; item["karar_sira"] = 3
+    else: item["karar"] = "ACİL SAT (<25 Puan)"; item["karar_sira"] = 4
 
 calculated_funds.sort(key=lambda item: (item["karar_sira"], -item["kgdm_skor"], -item["cumulative_return"]))
 
 display_rows = []
 for item in calculated_funds:
     display_rows.append({
-        "Fon": item["code"], "KGDM-3": item["kgdm_skor"], "Karar": item["karar"],
-        "Ort. Getiri %": round(item["mean_return"], 3), "Volatilite %": round(item["volatility"], 3),
-        "Sharpe": round(item["sharpe_like"], 3), "Kümülatif Getiri %": round(item["cumulative_return"], 3),
-        "AUM ₺": round(item["aum"], 0) if item["aum"] else 0, "Yatırımcı": item["investors"],
-        "Valör": item["valor"] if item["valor"] is not None else "-", "Kaynak": item["data_source"]
+        "Fon": item["code"], 
+        "KGDM-3 (Ort3)": item["kgdm_skor"], 
+        "Son 3 Gün Skorlar": item["last_3_scores_str"],
+        "3 Günlük Trend": item["trend_status"],
+        "Karar": item["karar"],
+        "Ort. Getiri %": round(item["mean_return"], 3), 
+        "Volatilite %": round(item["volatility"], 3),
+        "Sharpe": round(item["sharpe_like"], 3), 
+        "Kümülatif Getiri %": round(item["cumulative_return"], 3),
+        "AUM ₺": round(item["aum"], 0) if item["aum"] else 0, 
+        "Yatırımcı": item["investors"],
+        "Valör": item["valor"] if item["valor"] is not None else "-", 
+        "Kaynak": item["data_source"]
     })
 
 df_display = pd.DataFrame(display_rows)
 
 def color_cells(value):
     text = str(value)
-    if "GÜÇLÜ AL" in text or "ASIL LİSTE" in text: return "color: #008000; font-weight: bold;"
-    if "NÖTR" in text: return "color: #B8860B; font-weight: bold;"
-    if "ACİL SAT" in text: return "color: #FF0000; font-weight: bold;"
+    if "GÜÇLÜ AL" in text or "ASIL LİSTE" in text or "Yükselişte" in text: return "color: #008000; font-weight: bold;"
+    if "NÖTR" in text or "Yatay" in text: return "color: #B8860B; font-weight: bold;"
+    if "ACİL SAT" in text or "Düşüşte" in text: return "color: #FF0000; font-weight: bold;"
     return ""
 
 try: styled_df = df_display.style.map(color_cells)
 except AttributeError: styled_df = df_display.style.applymap(color_cells)
 
-st.subheader("📊 KGDM-3 Fon Sonuçları")
+st.subheader("📊 KGDM-3 Fon Sonuçları (Son 3 Gün Trend & Skor Analizi)")
 st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
 strong_buy_count = sum(item["kgdm_skor"] >= 60 for item in calculated_funds)
@@ -542,7 +578,7 @@ if source_errors:
         st.dataframe(pd.DataFrame(source_errors), use_container_width=True, hide_index=True)
 
 output = create_excel_output(wb=wb, ws_list=ws_list, calculated_funds=calculated_funds, n_days=n_days)
-st.success(f"✅ Analiz tamamlandı. {len(calculated_funds)} fon, geçmiş her bir iş günü (10 gün) için kendi içinde Z-Skor ile yarıştırılarak hesaplandı.")
+st.success(f"✅ Analiz tamamlandı. {len(calculated_funds)} fon için son 3 günlük skor trendleri ve kazanç/kayıp durumları modele yansıtıldı.")
 
 st.download_button(label="📥 Güncellenmiş Excel'i İndir", data=output, file_name="fonlar_guncel.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 st.caption(f"KGDM-3 Fon Analiz Otomasyonu v{APP_VERSION} | Analiz tarihi: {today.strftime('%d.%m.%Y')}")
