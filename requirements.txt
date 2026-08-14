@@ -4,3 +4,4 @@ openpyxl
 tefas-crawler
 pytefas
 requests
+cloudscraper
