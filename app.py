@@ -1,29 +1,3 @@
-ChatGPT:
-Evet. Aşağıda verdiğin son kodu baştan sona revize edilmiş tek parça halinde veriyorum.
-
-Yaptığım başlıca düzeltmeler:
-
-Valör * 0.5 şeklindeki aşırı ceza kaldırıldı.
-Haftalık getiri bileşik getiri olarak hesaplanıyor.
-KGDM skorunda 0–100 normalize edilmiş alt skorlar kullanılıyor.
-Sharpe + Sortino benzeri risk-düzeltilmiş skor eklendi.
-Drawdown skoru ters yönde doğru çalışıyor.
-Konsantrasyon riski ayrı skorlanıyor.
-KAZRİSK; AUM + yatırımcı trendi + konsantrasyon + likidite bileşenlerine ayrıldı.
-BIST30 tespiti ile ters repo tespiti birbirinden ayrıldı.
-Günlük skor hesaplanırken AUM/yatırımcı değişimi yanlış şekilde her güne kopyalanmıyor; statik yapısal metrikler ayrı tutuluyor.
-KGDM %55 + KAZRİSK %30 + Kalıcılık %15 hibrit yapısı kullanılıyor.
-4 kademeli karar yapısı 5 kademeye çıkarıldı: GÜÇLÜ AL / AL / ASIL LİSTE / DÜZELTME-İZLE / ACİL SAT.
-Excel'e KGDM ve KAZRİSK bileşenleri ayrıca yazılıyor.
-math eksikliği giderildi.
-TEFAS'ta aum veya investors kolonları bulunmazsa hata oluşması engellendi.
-Kodun “4 farklı veri kaynağı” şeklindeki yanıltıcı ifadesi düzeltilip mevcut gerçek kaynaklara göre yazıldı.
-n_days sıfır olduğunda hata oluşması engellendi.
-total_funds == 0 progress-bar problemi giderildi.
-İş Yatırım fallback'ında AUM/yatırımcı bilgilerinin sıfırlanması korunuyor.
-weekly_return ile filtre artık gerçekten bileşik haftalık getiriyi kullanıyor.
-Aşağıdaki kodu mevcut kodunun tamamının yerine koyabilirsin:
-
 import datetime as dt
 import io
 import math
