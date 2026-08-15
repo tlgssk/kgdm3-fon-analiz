@@ -1,6 +1,5 @@
 import datetime as dt
 import io
-import math
 import re
 from typing import Optional
 
@@ -19,17 +18,15 @@ from openpyxl.utils import get_column_letter
 # ============================================================
 
 st.set_page_config(
-    page_title="KGDM-3 & KAZRİSK® Hibrit Fon Analiz Otomasyonu",
+    page_title="KGDM-3 & KAZRİSK Hibrit Fon Analizi",
     page_icon="📊",
     layout="wide",
 )
 
 st.title("📊 KGDM-3 & KAZRİSK® Hibrit Fon Analiz ve Excel Otomasyonu")
-
 st.caption(
-    "TEFAS + İş Yatırım + Fintables veri motoru | "
-    "Normalize KGDM Momentum + KAZRİSK® Güvenlik/Likidite "
-    "hibrit skorlama"
+    "TEFAS + İş Yatırım + TEFAS Direct API + Fintables/KAP | "
+    "Momentum + Risk + Likidite Hibrit Skor Motoru V6.1"
 )
 
 
@@ -41,21 +38,16 @@ FUND_KINDS = ("YAT", "EMK", "BYF")
 
 LOOKBACK_CALENDAR_DAYS = 45
 TARGET_TRADING_DAYS = 10
+MIN_ROLLING_DAYS = 5
 HTTP_TIMEOUT = 12
 
-APP_VERSION = "7.0.0"
-
-
-# ============================================================
-# GITHUB EXCEL
-# ============================================================
+APP_VERSION = "6.1.0"
 
 GITHUB_EXCEL_URL = (
     "https://github.com/tlgssk/kgdm3-fon-analiz/"
     "raw/refs/heads/main/"
     "Menkul_Kiymet_Yatirim_Fonlari_EXCEL_Tum_Veri_2026-08-14.xlsx"
 )
-
 
 # ============================================================
 # RENKLER
@@ -73,36 +65,51 @@ COLOR_LIGHT_RED = "FCE4D6"
 
 
 # ============================================================
-# SKOR AĞIRLIKLARI
+# SKOR PARAMETRELERİ
 # ============================================================
 
-# KGDM toplam ağırlığı = %55
-KGDM_WEIGHT = 0.55
+# Momentum tarafı toplam 100 puan
+MOMENTUM_WEIGHTS = {
+    "return": 0.30,
+    "sharpe": 0.25,
+    "cumulative": 0.25,
+    "drawdown": 0.20,
+}
 
-# KAZRİSK toplam ağırlığı = %30
-KAZRISK_WEIGHT = 0.30
+# Güvenlik / likidite tarafı toplam 100 puan
+SECURITY_WEIGHTS = {
+    "aum": 0.30,
+    "investor": 0.25,
+    "concentration": 0.25,
+    "liquidity": 0.20,
+}
 
-# Son dönem kalıcılığı = %15
-PERSISTENCE_WEIGHT = 0.15
+# Nihai hibrit
+HYBRID_MOMENTUM_WEIGHT = 0.60
+HYBRID_SECURITY_WEIGHT = 0.40
 
+# Z-score sınırı
+Z_LIMIT = 2.5
 
-# KGDM iç ağırlıkları
-KGDM_RETURN_WEIGHT = 0.30
-KGDM_RISK_ADJUSTED_WEIGHT = 0.25
-KGDM_VOLATILITY_WEIGHT = 0.15
-KGDM_DRAWDOWN_WEIGHT = 0.15
-KGDM_MOMENTUM_WEIGHT = 0.15
+# Karar seviyeleri
+STRONG_BUY = 75
+WATCH_LIST = 50
+CORRECTION = 35
 
+# Valör cezası
+# Artık doğrudan "valor * 0.5" kullanılmıyor.
+# Valör 0-100 aralığında normalize edilerek maksimum sınırlı ceza uygulanıyor.
+MAX_VALOR_PENALTY = 8.0
 
-# KAZRİSK iç ağırlıkları
-KAZRISK_AUM_WEIGHT = 0.35
-KAZRISK_INVESTOR_WEIGHT = 0.25
-KAZRISK_CONCENTRATION_WEIGHT = 0.20
-KAZRISK_LIQUIDITY_WEIGHT = 0.20
+# Yapısal risk cezaları
+MAX_CONCENTRATION_PENALTY = 20.0
+BIST30_BONUS = 5.0
+HIGH_LIQUIDITY_BONUS = 5.0
+POSITIVE_INVESTOR_FLOW_BONUS = 3.0
 
 
 # ============================================================
-# KULLANICI KONTROL PANELİ
+# SIDEBAR
 # ============================================================
 
 st.sidebar.header("⚙️ Analiz & Filtre Kriterleri")
@@ -111,8 +118,8 @@ ENABLE_FILTERS = st.sidebar.checkbox(
     "Filtreleri Etkinleştir",
     value=False,
     help=(
-        "Kapatılırsa listedeki bütün fonlar hesaplanır. "
-        "Açılırsa yatırımcı sayısı ve haftalık getiri filtreleri uygulanır."
+        "Kapalı olduğunda listedeki tüm fonlar hesaplanır. "
+        "Açık olduğunda yatırımcı ve haftalık getiri kriterleri uygulanır."
     ),
 )
 
@@ -122,10 +129,6 @@ TARGET_WEEKLY_RETURN = st.sidebar.slider(
     max_value=10.00,
     value=0.00,
     step=0.10,
-    help=(
-        "Filtre aktifse minimum bileşik 5 işlem günlük getiri "
-        "beklentisi olarak kullanılır."
-    ),
 )
 
 MIN_INVESTOR_COUNT = st.sidebar.slider(
@@ -134,10 +137,6 @@ MIN_INVESTOR_COUNT = st.sidebar.slider(
     max_value=100000,
     value=0,
     step=500,
-    help=(
-        "Filtre aktifse yatırımcı sayısı bu değerin altında "
-        "olan fonlar değerlendirme dışı bırakılır."
-    ),
 )
 
 
@@ -145,16 +144,29 @@ MIN_INVESTOR_COUNT = st.sidebar.slider(
 # YARDIMCI FONKSİYONLAR
 # ============================================================
 
+def safe_float(value, default=0.0) -> float:
+    try:
+        if value is None:
+            return default
+
+        number = float(value)
+
+        if pd.isna(number):
+            return default
+
+        return number
+
+    except Exception:
+        return default
+
+
 def parse_number(value) -> Optional[float]:
-    """
-    Türkçe / İngilizce sayı formatlarını mümkün olduğunca
-    güvenli şekilde float'a çevirir.
-    """
 
     if value is None or isinstance(value, bool):
         return None
 
     if isinstance(value, (int, float)):
+
         try:
             if pd.isna(value):
                 return None
@@ -169,8 +181,7 @@ def parse_number(value) -> Optional[float]:
         return None
 
     text = (
-        text
-        .replace("₺", "")
+        text.replace("₺", "")
         .replace("TL", "")
         .replace("%", "")
         .replace(" ", "")
@@ -181,21 +192,25 @@ def parse_number(value) -> Optional[float]:
         return None
 
     if "," in text and "." in text:
+
         if text.rfind(",") > text.rfind("."):
             text = text.replace(".", "").replace(",", ".")
         else:
             text = text.replace(",", "")
 
     elif "," in text:
+
         text = text.replace(",", ".")
 
     try:
         return float(text)
+
     except (ValueError, TypeError):
         return None
 
 
 def normalize_fund_code(value) -> str:
+
     if value is None:
         return ""
 
@@ -207,39 +222,8 @@ def normalize_fund_code(value) -> str:
     return code
 
 
-def safe_float(value, default=0.0):
-    try:
-        if value is None:
-            return default
-
-        value = float(value)
-
-        if not math.isfinite(value):
-            return default
-
-        return value
-
-    except Exception:
-        return default
-
-
-def clamp(value, low=0.0, high=100.0):
-    """
-    Değeri belirlenen aralıkta tutar.
-    """
-
-    try:
-        value = float(value)
-    except Exception:
-        return low
-
-    if not math.isfinite(value):
-        return low
-
-    return max(low, min(high, value))
-
-
 def format_percent(value) -> str:
+
     number = parse_number(value)
 
     if number is None:
@@ -254,214 +238,45 @@ def format_percent(value) -> str:
     return "%0.00"
 
 
-def compound_return(returns):
-    """
-    Günlük getirileri bileşik olarak birleştirir.
+def clamp(value, low, high):
 
-    Örnek:
-    +%2 ve -%2
-    = %0 değil,
-    yaklaşık -%0.04.
-    """
+    return max(low, min(high, value))
 
-    if not returns:
-        return 0.0
 
-    wealth = 1.0
+# ============================================================
+# BİLEŞİK GETİRİ
+# ============================================================
 
-    for r in returns:
-        try:
-            r = float(r)
+def calculate_compounded_return(returns):
 
-            if not math.isfinite(r):
-                continue
+    clean = []
 
-            wealth *= (1.0 + r / 100.0)
+    for value in returns:
 
-        except Exception:
+        value = safe_float(value, None)
+
+        if value is None:
             continue
 
-    return (wealth - 1.0) * 100.0
-
-
-# ============================================================
-# YÜZDELİK SKOR
-# ============================================================
-
-def percentile_score(
-    value,
-    values,
-    higher_is_better=True,
-):
-    """
-    Fonlar arası göreli performansı 0-100 aralığına taşır.
-
-    Böylece:
-        0   = en zayıf bölge
-        50  = orta
-        100 = en güçlü bölge
-
-    Aykırı Z-score değerlerinin doğrudan skoru ezmesi engellenir.
-    """
-
-    clean = []
-
-    for v in values:
-        try:
-            v = float(v)
-
-            if math.isfinite(v):
-                clean.append(v)
-
-        except Exception:
-            pass
+        clean.append(value)
 
     if not clean:
-        return 50.0
-
-    try:
-        value = float(value)
-
-        if not math.isfinite(value):
-            return 50.0
-
-    except Exception:
-        return 50.0
-
-    if len(clean) == 1:
-        return 50.0
-
-    below = sum(v < value for v in clean)
-    equal = sum(v == value for v in clean)
-
-    percentile = (
-        (below + 0.5 * equal)
-        / len(clean)
-        * 100.0
-    )
-
-    if not higher_is_better:
-        percentile = 100.0 - percentile
-
-    return clamp(percentile)
-
-
-# ============================================================
-# DOWNSIDE VOLATİLİTE
-# ============================================================
-
-def downside_volatility(returns):
-    """
-    Negatif getirilerin RMS tipi downside volatilitesini hesaplar.
-    """
-
-    downside = []
-
-    for r in returns:
-
-        try:
-            r = float(r)
-
-            if math.isfinite(r) and r < 0:
-                downside.append(r)
-
-        except Exception:
-            pass
-
-    if not downside:
         return 0.0
 
-    return math.sqrt(
-        sum(r ** 2 for r in downside)
-        / len(downside)
-    )
+    growth = 1.0
 
+    for daily_return in clean:
 
-# ============================================================
-# RİSK DÜZELTİLMİŞ SKOR
-# ============================================================
+        growth *= 1.0 + daily_return / 100.0
 
-def risk_adjusted_score(returns):
-    """
-    Sharpe benzeri + Sortino benzeri skor.
-
-    Sonuç:
-        0-100
-
-    Sortino daha yüksek ağırlıklı tutulur çünkü fon analizinde
-    aşağı yönlü riskin cezalandırılması daha anlamlıdır.
-    """
-
-    if not returns:
-        return 50.0
-
-    clean = []
-
-    for r in returns:
-        try:
-            r = float(r)
-
-            if math.isfinite(r):
-                clean.append(r)
-
-        except Exception:
-            pass
-
-    if len(clean) < 2:
-        return 50.0
-
-    mean_ret = sum(clean) / len(clean)
-
-    variance = sum(
-        (r - mean_ret) ** 2
-        for r in clean
-    ) / len(clean)
-
-    volatility = math.sqrt(
-        max(0.0, variance)
-    )
-
-    if volatility > 1e-12:
-        sharpe = mean_ret / volatility
-    else:
-        sharpe = 3.0 if mean_ret > 0 else 0.0
-
-    downside = downside_volatility(clean)
-
-    if downside > 1e-12:
-        sortino = mean_ret / downside
-    else:
-        sortino = 3.0 if mean_ret > 0 else 0.0
-
-    sharpe = max(-3.0, min(3.0, sharpe))
-    sortino = max(-3.0, min(3.0, sortino))
-
-    sharpe_score = (
-        50.0 + (sharpe / 3.0) * 50.0
-    )
-
-    sortino_score = (
-        50.0 + (sortino / 3.0) * 50.0
-    )
-
-    return clamp(
-        sharpe_score * 0.45
-        + sortino_score * 0.55
-    )
+    return (growth - 1.0) * 100.0
 
 
 # ============================================================
 # MAX DRAWDOWN
 # ============================================================
 
-def calculate_drawdown(prices):
-    """
-    Maksimum drawdown değerini pozitif risk büyüklüğü olarak döndürür.
-
-    Örneğin:
-        -%5 drawdown -> 5
-        -%20 drawdown -> 20
-    """
+def calculate_max_drawdown(prices):
 
     if not prices or len(prices) < 2:
         return 0.0
@@ -471,10 +286,7 @@ def calculate_drawdown(prices):
 
     for price in prices:
 
-        try:
-            price = float(price)
-        except Exception:
-            continue
+        price = safe_float(price)
 
         if price <= 0:
             continue
@@ -483,410 +295,107 @@ def calculate_drawdown(prices):
             peak = price
 
         if peak > 0:
-            dd = (
-                price / peak - 1.0
-            ) * 100.0
 
-            max_dd = min(
-                max_dd,
-                dd,
-            )
+            dd = (price / peak - 1.0) * 100.0
 
-    return abs(max_dd)
+            if dd < max_dd:
+                max_dd = dd
 
-
-def drawdown_score(max_dd):
-    """
-    Drawdown'u 0-100 güvenlik skoruna çevirir.
-
-    0% DD -> 100
-    10% DD -> yaklaşık 37
-    Daha yüksek DD -> hızla düşer.
-    """
-
-    dd = max(
-        0.0,
-        safe_float(max_dd),
-    )
-
-    score = 100.0 * math.exp(
-        -dd / 10.0
-    )
-
-    return clamp(score)
+    # Negatif olarak döndürülür.
+    # Örn. -7.5 = %7.5 drawdown
+    return max_dd
 
 
 # ============================================================
-# KONSANTRASYON SKORU
+# Z-SCORE
 # ============================================================
 
-def concentration_score(top_asset_weight):
-    """
-    En büyük varlık ağırlığından konsantrasyon riski çıkarır.
+def zscore(values):
 
-    <= %10  -> 100
-    %30      -> 50
-    >= %50   -> 0
-    """
+    if not values:
+        return []
 
-    weight = max(
-        0.0,
-        safe_float(top_asset_weight),
-    )
+    clean = []
 
-    if weight <= 10:
-        return 100.0
+    for value in values:
 
-    if weight >= 50:
-        return 0.0
+        try:
 
-    score = (
-        100.0
-        - (
-            (weight - 10.0)
-            / 40.0
-            * 100.0
-        )
-    )
+            value = float(value)
 
-    return clamp(score)
+            if pd.isna(value):
+                clean.append(None)
+            else:
+                clean.append(value)
 
+        except Exception:
 
-# ============================================================
-# LİKİDİTE SKORU
-# ============================================================
+            clean.append(None)
 
-def liquidity_score(item):
-    """
-    Likidite / güvenlik skoru.
+    valid = [x for x in clean if x is not None]
 
-    BIST30 bilgisi tek başına güvenlik garantisi olarak
-    kullanılmaz; yalnızca sınırlı bir bonus sağlar.
-    """
+    if len(valid) < 2:
+        return [0.0 for _ in clean]
 
-    score = 50.0
-
-    cash_ratio = safe_float(
-        item.get(
-            "emergency_cash_ratio",
-            5.0,
-        )
-    )
+    mean_value = sum(valid) / len(valid)
 
-    if cash_ratio >= 20:
-        score += 25
+    variance = sum(
+        (x - mean_value) ** 2
+        for x in valid
+    ) / len(valid)
 
-    elif cash_ratio >= 10:
-        score += 15
+    std = variance ** 0.5
 
-    elif cash_ratio >= 5:
-        score += 5
+    if std <= 1e-12:
+        return [0.0 for _ in clean]
 
-    else:
-        score -= 10
+    result = []
 
-    if item.get("is_bist30", False):
-        score += 10
+    for value in clean:
 
-    top_weight = safe_float(
-        item.get(
-            "top_asset_weight",
-            0.0,
-        )
-    )
-
-    if top_weight > 40:
-        score -= 20
-
-    elif top_weight > 30:
-        score -= 10
-
-    return clamp(score)
-
-
-# ============================================================
-# KAZRİSK SKORU
-# ============================================================
-
-def calculate_kazrisk_score(item):
-    """
-    KAZRİSK® 0-100 güvenlik / dayanıklılık skoru.
-
-    %35 AUM
-    %25 yatırımcı trendi
-    %20 konsantrasyon
-    %20 likidite
-    """
-
-    # --------------------------------------------------------
-    # AUM SKORU
-    # --------------------------------------------------------
-
-    aum = max(
-        safe_float(item.get("aum", 0.0)),
-        1.0,
-    )
-
-    aum_million = aum / 1_000_000.0
-
-    if aum_million <= 0:
-        aum_score = 0.0
-
-    else:
-        aum_score = clamp(
-            50.0
-            + math.log10(
-                max(aum_million, 0.1)
-            ) * 20.0
-        )
-
-    # --------------------------------------------------------
-    # YATIRIMCI TRENDİ
-    # --------------------------------------------------------
-
-    inv_change = safe_float(
-        item.get("inv_change", 0.0)
-    )
-
-    investor_score = clamp(
-        50.0 + inv_change * 2.0
-    )
-
-    # --------------------------------------------------------
-    # KONSANTRASYON
-    # --------------------------------------------------------
-
-    concentration = concentration_score(
-        item.get(
-            "top_asset_weight",
-            0.0,
-        )
-    )
-
-    # --------------------------------------------------------
-    # LİKİDİTE
-    # --------------------------------------------------------
-
-    liquidity = liquidity_score(item)
-
-    # --------------------------------------------------------
-    # KAZRİSK
-    # --------------------------------------------------------
-
-    kazrisk = (
-        aum_score
-        * KAZRISK_AUM_WEIGHT
-
-        + investor_score
-        * KAZRISK_INVESTOR_WEIGHT
-
-        + concentration
-        * KAZRISK_CONCENTRATION_WEIGHT
-
-        + liquidity
-        * KAZRISK_LIQUIDITY_WEIGHT
-    )
-
-    return clamp(kazrisk)
-
-
-# ============================================================
-# KGDM SKORU
-# ============================================================
-
-def calculate_kgdm_score(
-    item,
-    peer_items,
-):
-    """
-    KGDM Momentum skoru.
-
-    %30 Kümülatif Getiri
-    %25 Risk Düzeltilmiş Getiri
-    %15 Volatilite
-    %15 Drawdown
-    %15 Son 3 Gün Momentum
-    """
-
-    returns = item.get(
-        "daily_returns",
-        [],
-    )
-
-    prices = item.get(
-        "prices",
-        [],
-    )
-
-    if not returns or len(prices) < 2:
-        return 50.0
-
-    # --------------------------------------------------------
-    # FON METRİKLERİ
-    # --------------------------------------------------------
-
-    mean_ret = (
-        sum(returns) / len(returns)
-    )
-
-    if len(returns) >= 2:
-
-        variance = sum(
-            (r - mean_ret) ** 2
-            for r in returns
-        ) / len(returns)
-
-        volatility = math.sqrt(
-            max(0.0, variance)
-        )
-
-    else:
-        volatility = 0.0
-
-    cumulative = compound_return(
-        returns
-    )
-
-    max_dd = calculate_drawdown(
-        prices
-    )
-
-    risk_adj = risk_adjusted_score(
-        returns
-    )
-
-    recent_returns = returns[-3:]
-
-    recent_momentum = compound_return(
-        recent_returns
-    )
-
-    # --------------------------------------------------------
-    # AKRAN HAVUZLARI
-    # --------------------------------------------------------
-
-    peer_cum = []
-    peer_mean = []
-    peer_vol = []
-    peer_momentum = []
-
-    for peer in peer_items:
-
-        peer_returns = peer.get(
-            "daily_returns",
-            [],
-        )
-
-        if not peer_returns:
+        if value is None:
+            result.append(0.0)
             continue
 
-        peer_cum.append(
-            compound_return(
-                peer_returns
-            )
-        )
+        z = (value - mean_value) / std
 
-        peer_mean.append(
-            sum(peer_returns)
-            / len(peer_returns)
-        )
+        z = clamp(z, -Z_LIMIT, Z_LIMIT)
 
-        if len(peer_returns) >= 2:
+        result.append(z)
 
-            peer_mean_value = (
-                sum(peer_returns)
-                / len(peer_returns)
-            )
-
-            peer_variance = sum(
-                (
-                    r - peer_mean_value
-                ) ** 2
-                for r in peer_returns
-            ) / len(peer_returns)
-
-            peer_vol.append(
-                math.sqrt(
-                    max(
-                        0.0,
-                        peer_variance,
-                    )
-                )
-            )
-
-        else:
-            peer_vol.append(0.0)
-
-        peer_momentum.append(
-            compound_return(
-                peer_returns[-3:]
-            )
-        )
-
-    # --------------------------------------------------------
-    # ALT SKORLAR
-    # --------------------------------------------------------
-
-    score_return = percentile_score(
-        cumulative,
-        peer_cum,
-        higher_is_better=True,
-    )
-
-    score_mean = percentile_score(
-        mean_ret,
-        peer_mean,
-        higher_is_better=True,
-    )
-
-    score_vol = percentile_score(
-        volatility,
-        peer_vol,
-        higher_is_better=False,
-    )
-
-    score_momentum = percentile_score(
-        recent_momentum,
-        peer_momentum,
-        higher_is_better=True,
-    )
-
-    score_risk_adj = clamp(
-        risk_adj
-    )
-
-    score_dd = drawdown_score(
-        max_dd
-    )
-
-    # --------------------------------------------------------
-    # KGDM
-    # --------------------------------------------------------
-
-    kgdm = (
-        score_return
-        * KGDM_RETURN_WEIGHT
-
-        + score_risk_adj
-        * KGDM_RISK_ADJUSTED_WEIGHT
-
-        + score_vol
-        * KGDM_VOLATILITY_WEIGHT
-
-        + score_dd
-        * KGDM_DRAWDOWN_WEIGHT
-
-        + score_momentum
-        * KGDM_MOMENTUM_WEIGHT
-    )
-
-    return clamp(kgdm)
+    return result
 
 
 # ============================================================
-# EXCEL / VERİ FONKSİYONLARI
+# VALÖR NORMALİZASYONU
 # ============================================================
 
+def calculate_valor_penalty(valor):
+
+    """
+    Valör artık ham TL veya nominal sayı olarak skoru ezmez.
+
+    Varsayım:
+    - 0 veya negatif -> ceza yok
+    - 1-100 arası -> doğrusal normalize
+    - 100 üzeri -> maksimum ceza
+    """
+
+    valor = safe_float(valor)
+
+    if valor <= 0:
+        return 0.0
+
+    normalized = clamp(valor / 100.0, 0.0, 1.0)
+
+    return normalized * MAX_VALOR_PENALTY
+
+
+# ============================================================
+# 1. TEFAS UNIVERSE
+# ============================================================
+
+@st.cache_data(show_spinner=False, ttl=60 * 30)
 def fetch_tefas_universe(
     start_date: dt.date,
     end_date: dt.date,
@@ -938,9 +447,7 @@ def fetch_tefas_universe(
             )
 
         if "price" in df.columns:
-            df["price"] = df[
-                "price"
-            ].apply(parse_number)
+            df["price"] = df["price"].apply(parse_number)
 
         if "aum" in df.columns:
             df["aum"] = (
@@ -948,7 +455,6 @@ def fetch_tefas_universe(
                 .apply(parse_number)
                 .fillna(0.0)
             )
-
         else:
             df["aum"] = 0.0
 
@@ -958,7 +464,6 @@ def fetch_tefas_universe(
                 .apply(parse_number)
                 .fillna(0.0)
             )
-
         else:
             df["investors"] = 0.0
 
@@ -970,27 +475,16 @@ def fetch_tefas_universe(
         )
 
         df = df.dropna(
-            subset=[
-                "date",
-                "code",
-                "price",
-            ]
+            subset=["date", "code", "price"]
         )
 
-        df = df[
-            df["price"] > 0
-        ]
+        df = df[df["price"] > 0]
 
         return (
             df
-            .sort_values(
-                ["code", "date"]
-            )
+            .sort_values(["code", "date"])
             .drop_duplicates(
-                subset=[
-                    "code",
-                    "date",
-                ],
+                subset=["code", "date"],
                 keep="last",
             )
             .reset_index(drop=True)
@@ -1002,16 +496,14 @@ def fetch_tefas_universe(
 
 
 # ============================================================
-# İŞ YATIRIM
+# 2. İŞ YATIRIM
 # ============================================================
 
 def fetch_isyatirim_series(
     fund_code: str,
 ) -> Optional[pd.DataFrame]:
 
-    code = normalize_fund_code(
-        fund_code
-    )
+    code = normalize_fund_code(fund_code)
 
     if not code:
         return None
@@ -1019,28 +511,22 @@ def fetch_isyatirim_series(
     end = dt.datetime.now()
 
     start = (
-        end
-        - dt.timedelta(
+        end -
+        dt.timedelta(
             days=LOOKBACK_CALENDAR_DAYS
         )
     )
 
     url = (
         "https://www.isyatirim.com.tr/"
-        "_layouts/15/"
-        "IsYatirim.Website/"
-        "Common/Data.aspx/"
-        "YatirimFonGecmisGetiri"
+        "_layouts/15/IsYatirim.Website/Common/"
+        "Data.aspx/YatirimFonGecmisGetiri"
     )
 
     params = {
         "fonKod": code,
-        "baslangic": start.strftime(
-            "%d-%m-%Y"
-        ),
-        "bitis": end.strftime(
-            "%d-%m-%Y"
-        ),
+        "baslangic": start.strftime("%d-%m-%Y"),
+        "bitis": end.strftime("%d-%m-%Y"),
     }
 
     headers = {
@@ -1061,16 +547,12 @@ def fetch_isyatirim_series(
 
         payload = response.json()
 
-        values = payload.get(
-            "value"
-        )
+        values = payload.get("value")
 
         if not values:
             return None
 
-        df = pd.DataFrame(
-            values
-        )
+        df = pd.DataFrame(values)
 
         if (
             "Tarih" not in df.columns
@@ -1093,15 +575,10 @@ def fetch_isyatirim_series(
         df["investors"] = 0.0
 
         df = df.dropna(
-            subset=[
-                "date",
-                "price",
-            ]
+            subset=["date", "price"]
         )
 
-        df = df[
-            df["price"] > 0
-        ]
+        df = df[df["price"] > 0]
 
         if len(df) < 2:
             return None
@@ -1113,9 +590,7 @@ def fetch_isyatirim_series(
                 subset=["date"],
                 keep="last",
             )
-            .tail(
-                TARGET_TRADING_DAYS + 1
-            )
+            .tail(TARGET_TRADING_DAYS + 1)
             .reset_index(drop=True)
         )
 
@@ -1134,16 +609,14 @@ def fetch_isyatirim_series(
 
 
 # ============================================================
-# TEFAS DOĞRUDAN API
+# 3. TEFAS DIRECT API
 # ============================================================
 
 def fetch_tefas_direct_api(
     fund_code: str,
 ) -> Optional[pd.DataFrame]:
 
-    code = normalize_fund_code(
-        fund_code
-    )
+    code = normalize_fund_code(fund_code)
 
     if not code:
         return None
@@ -1151,8 +624,8 @@ def fetch_tefas_direct_api(
     end = dt.datetime.now()
 
     start = (
-        end
-        - dt.timedelta(
+        end -
+        dt.timedelta(
             days=LOOKBACK_CALENDAR_DAYS
         )
     )
@@ -1165,12 +638,8 @@ def fetch_tefas_direct_api(
     payload = {
         "fontip": "YAT",
         "fonkod": code,
-        "bastarih": start.strftime(
-            "%d.%m.%Y"
-        ),
-        "bittarih": end.strftime(
-            "%d.%m.%Y"
-        ),
+        "bastarih": start.strftime("%d.%m.%Y"),
+        "bittarih": end.strftime("%d.%m.%Y"),
     }
 
     headers = {
@@ -1181,17 +650,17 @@ def fetch_tefas_direct_api(
 
     try:
 
-        res = requests.post(
+        response = requests.post(
             url,
             data=payload,
             headers=headers,
             timeout=HTTP_TIMEOUT,
         )
 
-        if res.status_code != 200:
+        if response.status_code != 200:
             return None
 
-        data = res.json().get(
+        data = response.json().get(
             "data",
             [],
         )
@@ -1201,9 +670,14 @@ def fetch_tefas_direct_api(
 
         df = pd.DataFrame(data)
 
-        if (
-            "TARIH" not in df.columns
-            or "FIYAT" not in df.columns
+        required = [
+            "TARIH",
+            "FIYAT",
+        ]
+
+        if not all(
+            column in df.columns
+            for column in required
         ):
             return None
 
@@ -1219,6 +693,7 @@ def fetch_tefas_direct_api(
         )
 
         if "PORTFOYBUYUKLUK" in df.columns:
+
             df["aum"] = (
                 df["PORTFOYBUYUKLUK"]
                 .apply(parse_number)
@@ -1226,9 +701,11 @@ def fetch_tefas_direct_api(
             )
 
         else:
+
             df["aum"] = 0.0
 
         if "KISISAYISI" in df.columns:
+
             df["investors"] = (
                 df["KISISAYISI"]
                 .apply(parse_number)
@@ -1236,18 +713,14 @@ def fetch_tefas_direct_api(
             )
 
         else:
+
             df["investors"] = 0.0
 
         df = df.dropna(
-            subset=[
-                "date",
-                "price",
-            ]
+            subset=["date", "price"]
         )
 
-        df = df[
-            df["price"] > 0
-        ]
+        df = df[df["price"] > 0]
 
         if len(df) < 2:
             return None
@@ -1259,9 +732,7 @@ def fetch_tefas_direct_api(
                 subset=["date"],
                 keep="last",
             )
-            .tail(
-                TARGET_TRADING_DAYS + 1
-            )
+            .tail(TARGET_TRADING_DAYS + 1)
             .reset_index(drop=True)
         )
 
@@ -1271,100 +742,116 @@ def fetch_tefas_direct_api(
 
 
 # ============================================================
-# FİNTABLES YAPISAL VERİ
+# 4. FİNTABLES / YAPISAL VERİ
 # ============================================================
 
 def fetch_fund_structural_data(
     fund_code: str,
 ) -> dict:
 
-    code = normalize_fund_code(
-        fund_code
-    )
+    code = normalize_fund_code(fund_code)
 
     structural = {
-        "top_asset_weight": 0.0,
+        "top_asset_weight": None,
         "is_bist30": False,
-        "emergency_cash_ratio": 5.0,
+        "is_bist30_known": False,
+        "emergency_cash_ratio": None,
+        "cash_ratio_known": False,
     }
 
     try:
 
         fintables_url = (
-            f"https://fintables.com/"
-            f"fonlar/{code.lower()}"
+            f"https://fintables.com/fonlar/"
+            f"{code.lower()}"
         )
 
         headers = {
             "User-Agent": "Mozilla/5.0"
         }
 
-        fin_res = requests.get(
+        response = requests.get(
             fintables_url,
             headers=headers,
             timeout=HTTP_TIMEOUT,
         )
 
-        if fin_res.status_code != 200:
+        if response.status_code != 200:
             return structural
 
-        text = fin_res.text
+        text = response.text
 
         # ----------------------------------------------------
-        # EN BÜYÜK VARLIK
+        # En büyük varlık
         # ----------------------------------------------------
 
         match_top = re.search(
             r'En Büyük Pay["\s:]+'
-            r'([0-9]+(?:\.[0-9]+)?)',
+            r'([0-9]+(?:[.,][0-9]+)?)',
             text,
             re.IGNORECASE,
         )
 
         if match_top:
 
-            structural[
-                "top_asset_weight"
-            ] = safe_float(
-                match_top.group(1)
+            structural["top_asset_weight"] = (
+                parse_number(
+                    match_top.group(1)
+                )
             )
 
         # ----------------------------------------------------
         # BIST30
         # ----------------------------------------------------
-        # Ters Repo görülmesi artık BIST30 olarak işaretlenmiyor.
 
-        if (
-            "BIST 30" in text
-            or "BIST30" in text
-        ):
+        # Önceki hatalı mantık:
+        # "BIST 100" veya "Ters Repo" görülünce BIST30=True
+        #
+        # Yeni mantık:
+        # Sadece BIST 30 açıkça bulunuyorsa True.
+        # ----------------------------------------------------
 
-            structural[
-                "is_bist30"
-            ] = True
+        bist30_match = re.search(
+            r"BIST\s*30",
+            text,
+            re.IGNORECASE,
+        )
+
+        if bist30_match:
+
+            structural["is_bist30"] = True
+            structural["is_bist30_known"] = True
 
         # ----------------------------------------------------
-        # NAKİT / TERS REPO
+        # Nakit / Ters Repo / PPF
         # ----------------------------------------------------
 
         match_cash = re.search(
             r'(?:Nakit|Ters Repo|PPF)'
             r'["\s:]+'
-            r'([0-9]+(?:\.[0-9]+)?)',
+            r'([0-9]+(?:[.,][0-9]+)?)',
             text,
             re.IGNORECASE,
         )
 
         if match_cash:
 
-            structural[
-                "emergency_cash_ratio"
-            ] = safe_float(
-                match_cash.group(1),
-                5.0,
+            cash_value = parse_number(
+                match_cash.group(1)
             )
 
+            if cash_value is not None:
+
+                structural[
+                    "emergency_cash_ratio"
+                ] = cash_value
+
+                structural[
+                    "cash_ratio_known"
+                ] = True
+
     except Exception:
+
         pass
 
     return structural
@@ -1378,20 +865,20 @@ def get_fund_series(
     universe: pd.DataFrame,
     fund_code: str,
 ):
-    code = normalize_fund_code(
-        fund_code
-    )
+
+    code = normalize_fund_code(fund_code)
 
     if not code:
-        return None, "Bulunamadı"
+        return None, "YOK"
 
     # --------------------------------------------------------
-    # 1. TEFAS UNIVERSE
+    # 1. TEFAS Universe
     # --------------------------------------------------------
 
     if (
         universe is not None
         and not universe.empty
+        and "code" in universe.columns
     ):
 
         rows = universe[
@@ -1416,54 +903,35 @@ def get_fund_series(
 
                 return (
                     rows
-                    .tail(
-                        TARGET_TRADING_DAYS + 1
-                    )
+                    .tail(TARGET_TRADING_DAYS + 1)
                     .reset_index(drop=True),
                     "TEFAS",
                 )
 
     # --------------------------------------------------------
-    # 2. TEFAS DIRECT API
+    # 2. TEFAS Direct API
     # --------------------------------------------------------
 
-    direct_df = (
-        fetch_tefas_direct_api(
-            code
-        )
-    )
+    direct_df = fetch_tefas_direct_api(code)
 
     if (
         direct_df is not None
         and len(direct_df) >= 2
     ):
 
-        return (
-            direct_df,
-            "TEFAS Direct API",
-        )
+        return direct_df, "TEFAS Direct API"
 
     # --------------------------------------------------------
-    # 3. İŞ YATIRIM
+    # 3. İş Yatırım
     # --------------------------------------------------------
 
-    is_df = (
-        fetch_isyatirim_series(
-            code
-        )
-    )
+    is_df = fetch_isyatirim_series(code)
 
-    if (
-        is_df is not None
-        and len(is_df) >= 2
-    ):
+    if is_df is not None:
 
-        return (
-            is_df,
-            "İş Yatırım",
-        )
+        return is_df, "İş Yatırım"
 
-    return None, "Bulunamadı"
+    return None, "YOK"
 
 
 # ============================================================
@@ -1475,10 +943,7 @@ def compute_fund_metrics(
     fund_code: str,
 ) -> Optional[dict]:
 
-    if (
-        series is None
-        or len(series) < 2
-    ):
+    if series is None or len(series) < 2:
         return None
 
     df = series.copy()
@@ -1493,7 +958,6 @@ def compute_fund_metrics(
         .apply(parse_number)
     )
 
-    # TEFAS / API kolonları eksik olabilir
     if "aum" not in df.columns:
         df["aum"] = 0.0
 
@@ -1513,15 +977,10 @@ def compute_fund_metrics(
     )
 
     df = df.dropna(
-        subset=[
-            "date",
-            "price",
-        ]
+        subset=["date", "price"]
     )
 
-    df = df[
-        df["price"] > 0
-    ]
+    df = df[df["price"] > 0]
 
     df = (
         df
@@ -1561,7 +1020,7 @@ def compute_fund_metrics(
     )
 
     # --------------------------------------------------------
-    # GÜNLÜK GETİRİLER
+    # Günlük getiriler
     # --------------------------------------------------------
 
     daily_returns = []
@@ -1578,11 +1037,7 @@ def compute_fund_metrics(
         else:
 
             daily_returns.append(
-                (
-                    current
-                    / previous
-                    - 1.0
-                )
+                (current / previous - 1.0)
                 * 100.0
             )
 
@@ -1590,65 +1045,65 @@ def compute_fund_metrics(
         return None
 
     # --------------------------------------------------------
-    # MAX DD
+    # Max DD
     # --------------------------------------------------------
 
-    max_dd = calculate_drawdown(
+    max_dd = calculate_max_drawdown(
         prices
     )
 
     # --------------------------------------------------------
-    # AUM DEĞİŞİMİ
+    # AUM değişimi
     # --------------------------------------------------------
 
     if aums[0] > 0:
 
         aum_change = (
-            (
-                aums[-1]
-                / aums[0]
-            )
-            - 1.0
-        ) * 100.0
+            (aums[-1] / aums[0] - 1.0)
+            * 100.0
+        )
 
     else:
 
         aum_change = 0.0
 
     # --------------------------------------------------------
-    # YATIRIMCI DEĞİŞİMİ
+    # Yatırımcı değişimi
     # --------------------------------------------------------
 
     if investors[0] > 0:
 
-        inv_change = (
-            (
-                investors[-1]
-                / investors[0]
-            )
-            - 1.0
-        ) * 100.0
+        investor_change = (
+            (investors[-1] / investors[0] - 1.0)
+            * 100.0
+        )
 
     else:
 
-        inv_change = 0.0
+        investor_change = 0.0
 
     # --------------------------------------------------------
-    # BİLEŞİK 5 GÜNLÜK GETİRİ
+    # DOĞRU HAFTALIK GETİRİ
+    #
+    # Eski:
+    # sum(daily_returns[-5:])
+    #
+    # Yeni:
+    # bileşik getiri
     # --------------------------------------------------------
 
-    weekly_returns = (
+    recent_weekly_returns = (
         daily_returns[-5:]
         if len(daily_returns) >= 5
         else daily_returns
     )
 
-    recent_weekly_ret = compound_return(
-        weekly_returns
+    weekly_return = calculate_compounded_return(
+        recent_weekly_returns
     )
 
     # --------------------------------------------------------
-    # YAPISAL VERİ
+    # Yapısal veriler
     # --------------------------------------------------------
 
     structural = fetch_fund_structural_data(
@@ -1663,20 +1118,741 @@ def compute_fund_metrics(
 
         "aum": aums[-1],
         "investors": int(
-            round(
-                investors[-1]
-            )
+            round(investors[-1])
         ),
 
         "aum_change": aum_change,
-        "inv_change": inv_change,
+        "inv_change": investor_change,
 
+        # Negatif tutuluyor:
+        # -5 = %5 drawdown
         "max_dd": max_dd,
 
-        "weekly_return": recent_weekly_ret,
+        "weekly_return": weekly_return,
 
         **structural,
     }
+
+
+# ============================================================
+# ROLLING METRİKLER
+# ============================================================
+
+def calculate_window_metrics(
+    prices,
+    returns,
+    window,
+):
+
+    if len(returns) < window:
+        return None
+
+    if len(prices) < window + 1:
+        return None
+
+    slice_returns = returns[-window:]
+
+    slice_prices = prices[-(window + 1):]
+
+    mean_return = (
+        sum(slice_returns)
+        / len(slice_returns)
+    )
+
+    variance = sum(
+        (r - mean_return) ** 2
+        for r in slice_returns
+    ) / len(slice_returns)
+
+    volatility = variance ** 0.5
+
+    if volatility > 1e-12:
+
+        sharpe_like = (
+            mean_return
+            / volatility
+        )
+
+    else:
+
+        sharpe_like = 0.0
+
+    cumulative_return = (
+        slice_prices[-1]
+        / slice_prices[0]
+        - 1.0
+    ) * 100.0
+
+    max_dd = calculate_max_drawdown(
+        slice_prices
+    )
+
+    return {
+        "mean_return": mean_return,
+        "volatility": volatility,
+        "sharpe": sharpe_like,
+        "cumulative": cumulative_return,
+        "max_dd": max_dd,
+    }
+
+
+# ============================================================
+# MOMENTUM SKORU
+# ============================================================
+
+def calculate_momentum_score(
+    metrics,
+    all_metrics,
+):
+
+    mean_z = zscore(
+        [
+            x["mean_return"]
+            for x in all_metrics
+        ]
+    )
+
+    sharpe_z = zscore(
+        [
+            x["sharpe"]
+            for x in all_metrics
+        ]
+    )
+
+    cumulative_z = zscore(
+        [
+            x["cumulative"]
+            for x in all_metrics
+        ]
+    )
+
+    # Drawdown zaten negatif:
+    # -1 iyi değil, -10 daha kötü.
+    #
+    # Bu nedenle z'yi tersine çeviriyoruz.
+    drawdown_z = zscore(
+        [
+            x["max_dd"]
+            for x in all_metrics
+        ]
+    )
+
+    current_index = all_metrics.index(
+        metrics
+    )
+
+    weighted_z = (
+
+        MOMENTUM_WEIGHTS["return"]
+        * mean_z[current_index]
+
+        +
+
+        MOMENTUM_WEIGHTS["sharpe"]
+        * sharpe_z[current_index]
+
+        +
+
+        MOMENTUM_WEIGHTS["cumulative"]
+        * cumulative_z[current_index]
+
+        -
+
+        MOMENTUM_WEIGHTS["drawdown"]
+        * drawdown_z[current_index]
+    )
+
+    # Z yaklaşık [-2.5, +2.5]
+    # 50 merkez, 20 ölçek
+    score = 50.0 + 20.0 * weighted_z
+
+    return clamp(
+        score,
+        0.0,
+        100.0,
+    )
+
+
+# ============================================================
+# GÜVENLİK / LİKİDİTE SKORU
+# ============================================================
+
+def calculate_security_scores(
+    funds,
+):
+
+    # --------------------------------------------------------
+    # AUM Z
+    # --------------------------------------------------------
+
+    aum_values = [
+        safe_float(
+            x.get("aum")
+        )
+        for x in funds
+    ]
+
+    investor_values = [
+        safe_float(
+            x.get("investors")
+        )
+        for x in funds
+    ]
+
+    aum_change_values = [
+        safe_float(
+            x.get("aum_change")
+        )
+        for x in funds
+    ]
+
+    investor_change_values = [
+        safe_float(
+            x.get("inv_change")
+        )
+        for x in funds
+    ]
+
+    aum_z = zscore(
+        aum_values
+    )
+
+    investor_z = zscore(
+        investor_values
+    )
+
+    aum_change_z = zscore(
+        aum_change_values
+    )
+
+    investor_change_z = zscore(
+        investor_change_values
+    )
+
+    # --------------------------------------------------------
+    # Konsantrasyon
+    #
+    # En büyük varlık yüksekse risk artar.
+    # --------------------------------------------------------
+
+    concentration_values = []
+
+    for fund in funds:
+
+        value = fund.get(
+            "top_asset_weight"
+        )
+
+        if value is None:
+            # Veri yoksa ortalama risk kabulü
+            concentration_values.append(
+                0.0
+            )
+        else:
+            concentration_values.append(
+                safe_float(value)
+            )
+
+    concentration_z = zscore(
+        concentration_values
+    )
+
+    for i, fund in enumerate(funds):
+
+        score = 50.0
+
+        # AUM
+        score += (
+            15.0
+            * aum_z[i]
+        )
+
+        # Yatırımcı
+        score += (
+            12.5
+            * investor_z[i]
+        )
+
+        # AUM büyümesi
+        score += (
+            10.0
+            * aum_change_z[i]
+        )
+
+        # Yatırımcı büyümesi
+        score += (
+            7.5
+            * investor_change_z[i]
+        )
+
+        # ----------------------------------------------------
+        # Konsantrasyon
+        #
+        # Z yüksek = yoğunlaşma yüksek = negatif
+        # ----------------------------------------------------
+
+        if fund.get(
+            "top_asset_weight"
+        ) is not None:
+
+            score -= (
+                12.5
+                * concentration_z[i]
+            )
+
+        # ----------------------------------------------------
+        # BIST30 bonus
+        # ----------------------------------------------------
+
+        if fund.get(
+            "is_bist30",
+            False,
+        ):
+
+            score += BIST30_BONUS
+
+        # ----------------------------------------------------
+        # Gerçek nakit verisi varsa
+        # ----------------------------------------------------
+
+        cash_ratio = fund.get(
+            "emergency_cash_ratio"
+        )
+
+        if (
+            fund.get(
+                "cash_ratio_known",
+                False,
+            )
+            and cash_ratio is not None
+        ):
+
+            if cash_ratio >= 15:
+
+                score += HIGH_LIQUIDITY_BONUS
+
+            elif cash_ratio < 5:
+
+                score -= 3.0
+
+        # ----------------------------------------------------
+        # Pozitif yatırımcı akışı
+        # ----------------------------------------------------
+
+        if safe_float(
+            fund.get("inv_change")
+        ) > 0:
+
+            score += POSITIVE_INVESTOR_FLOW_BONUS
+
+        # ----------------------------------------------------
+        # Konsantrasyon doğrudan ceza
+        # ----------------------------------------------------
+
+        top_asset = fund.get(
+            "top_asset_weight"
+        )
+
+        if top_asset is not None:
+
+            if top_asset > 30:
+
+                penalty = (
+                    top_asset - 30
+                ) * 1.0
+
+                penalty = min(
+                    penalty,
+                    MAX_CONCENTRATION_PENALTY,
+                )
+
+                score -= penalty
+
+            elif top_asset > 15:
+
+                # Orta düzey konsantrasyon
+                score -= (
+                    top_asset - 15
+                ) * 0.25
+
+        # ----------------------------------------------------
+        # Valör
+        # ----------------------------------------------------
+
+        score -= calculate_valor_penalty(
+            fund.get("valor")
+        )
+
+        fund["security_score"] = int(
+            round(
+                clamp(
+                    score,
+                    0.0,
+                    100.0,
+                )
+            )
+        )
+
+
+# ============================================================
+# ANA HİBRİT SKOR MOTORU
+# ============================================================
+
+def calculate_hybrid_scores(
+    funds,
+):
+
+    if not funds:
+        return
+
+    # Tüm fonların ortak gün sayısı
+    n_days = min(
+        x["n_days"]
+        for x in funds
+    )
+
+    # --------------------------------------------------------
+    # Her fonun serisini hizala
+    # --------------------------------------------------------
+
+    for fund in funds:
+
+        fund["dates"] = (
+            fund["dates"][-n_days:]
+        )
+
+        fund["daily_returns"] = (
+            fund["daily_returns"][-n_days:]
+        )
+
+        fund["prices"] = (
+            fund["prices"][-(n_days + 1):]
+        )
+
+        fund["running_scores"] = []
+
+        fund["running_momentum"] = []
+
+    # --------------------------------------------------------
+    # Yapısal güvenlik skoru
+    # Günlük olarak değişmediği için bir kez hesaplanır.
+    # --------------------------------------------------------
+
+    calculate_security_scores(
+        funds
+    )
+
+    # --------------------------------------------------------
+    # Günlük momentum
+    #
+    # Son 5 günlük rolling pencere.
+    #
+    # Böylece:
+    # 1. gün skoru ile 10. gün skoru farklı
+    # pencerelerden gelen anlamsız skorlar olmaz.
+    # --------------------------------------------------------
+
+    for d in range(
+        1,
+        n_days + 1,
+    ):
+
+        current_metrics = []
+
+        for fund in funds:
+
+            available_window = min(
+                MIN_ROLLING_DAYS,
+                d,
+            )
+
+            returns_slice = (
+                fund["daily_returns"][
+                    d - available_window:d
+                ]
+            )
+
+            prices_slice = (
+                fund["prices"][
+                    d - available_window:
+                    d + 1
+                ]
+            )
+
+            if len(
+                returns_slice
+            ) < 1:
+
+                continue
+
+            mean_return = (
+                sum(returns_slice)
+                / len(returns_slice)
+            )
+
+            variance = sum(
+                (
+                    r - mean_return
+                ) ** 2
+                for r in returns_slice
+            ) / len(returns_slice)
+
+            volatility = (
+                variance ** 0.5
+            )
+
+            if volatility > 1e-12:
+
+                sharpe = (
+                    mean_return
+                    / volatility
+                )
+
+            else:
+
+                sharpe = 0.0
+
+            cumulative = (
+                calculate_compounded_return(
+                    returns_slice
+                )
+            )
+
+            max_dd = calculate_max_drawdown(
+                prices_slice
+            )
+
+            current_metrics.append(
+                {
+                    "fund": fund,
+                    "mean_return": mean_return,
+                    "volatility": volatility,
+                    "sharpe": sharpe,
+                    "cumulative": cumulative,
+                    "max_dd": max_dd,
+                }
+            )
+
+        if not current_metrics:
+            continue
+
+        # ----------------------------------------------------
+        # Z-score
+        # ----------------------------------------------------
+
+        mean_z = zscore(
+            [
+                x["mean_return"]
+                for x in current_metrics
+            ]
+        )
+
+        sharpe_z = zscore(
+            [
+                x["sharpe"]
+                for x in current_metrics
+            ]
+        )
+
+        cumulative_z = zscore(
+            [
+                x["cumulative"]
+                for x in current_metrics
+            ]
+        )
+
+        drawdown_z = zscore(
+            [
+                x["max_dd"]
+                for x in current_metrics
+            ]
+        )
+
+        # ----------------------------------------------------
+        # Fon bazında momentum
+        # ----------------------------------------------------
+
+        for i, data in enumerate(
+            current_metrics
+        ):
+
+            # Büyük negatif DD kötü.
+            # DD zaten negatif olduğu için
+            # yüksek negatif z'yi ödüllendirmemek adına
+            # ters yön kullanıyoruz.
+
+            weighted_z = (
+
+                MOMENTUM_WEIGHTS["return"]
+                * mean_z[i]
+
+                +
+
+                MOMENTUM_WEIGHTS["sharpe"]
+                * sharpe_z[i]
+
+                +
+
+                MOMENTUM_WEIGHTS["cumulative"]
+                * cumulative_z[i]
+
+                -
+
+                MOMENTUM_WEIGHTS["drawdown"]
+                * drawdown_z[i]
+            )
+
+            momentum_score = (
+                50.0
+                + 20.0 * weighted_z
+            )
+
+            momentum_score = clamp(
+                momentum_score,
+                0.0,
+                100.0,
+            )
+
+            fund = data["fund"]
+
+            fund["running_momentum"].append(
+                int(round(momentum_score))
+            )
+
+    # --------------------------------------------------------
+    # Hibrit final
+    # --------------------------------------------------------
+
+    for fund in funds:
+
+        momentum_scores = (
+            fund["running_momentum"]
+        )
+
+        security_score = safe_float(
+            fund.get(
+                "security_score"
+            ),
+            50.0,
+        )
+
+        running_hybrid = []
+
+        for momentum in momentum_scores:
+
+            hybrid = (
+                momentum
+                * HYBRID_MOMENTUM_WEIGHT
+                +
+                security_score
+                * HYBRID_SECURITY_WEIGHT
+            )
+
+            hybrid = clamp(
+                hybrid,
+                0.0,
+                100.0,
+            )
+
+            running_hybrid.append(
+                int(round(hybrid))
+            )
+
+        fund["running_scores"] = (
+            running_hybrid
+        )
+
+        # ----------------------------------------------------
+        # Son 5 gün
+        # ----------------------------------------------------
+
+        last_5 = (
+            running_hybrid[-5:]
+            if len(running_hybrid) >= 5
+            else running_hybrid
+        )
+
+        fund["last_5_scores"] = last_5
+
+        fund["last_5_scores_str"] = (
+            " ➔ ".join(
+                str(x)
+                for x in last_5
+            )
+        )
+
+        if last_5:
+
+            # Son gün daha önemli
+            weights = list(
+                range(
+                    1,
+                    len(last_5) + 1,
+                )
+            )
+
+            weighted_average = (
+                sum(
+                    score * weight
+                    for score, weight
+                    in zip(
+                        last_5,
+                        weights,
+                    )
+                )
+                /
+                sum(weights)
+            )
+
+            fund["kgdm_skor"] = int(
+                round(
+                    weighted_average
+                )
+            )
+
+        else:
+
+            fund["kgdm_skor"] = None
+
+        # ----------------------------------------------------
+        # Karar
+        # ----------------------------------------------------
+
+        score = fund.get(
+            "kgdm_skor"
+        )
+
+        if score is None:
+
+            fund["karar"] = (
+                "YETERSİZ VERİ"
+            )
+
+        elif score >= STRONG_BUY:
+
+            fund["karar"] = (
+                "GÜÇLÜ AL"
+            )
+
+        elif score >= WATCH_LIST:
+
+            fund["karar"] = (
+                "ASIL LİSTE"
+            )
+
+        elif score >= CORRECTION:
+
+            fund["karar"] = (
+                "DÜZELTME / İZLE"
+            )
+
+        else:
+
+            fund["karar"] = (
+                "ACİL SAT"
+            )
+
+    return n_days
 
 
 # ============================================================
@@ -1714,8 +1890,8 @@ def style_excel_sheet(ws):
 
 def auto_fit_columns(
     ws,
-    min_width: int = 10,
-    max_width: int = 45,
+    min_width=10,
+    max_width=45,
 ):
 
     for column_cells in ws.columns:
@@ -1765,7 +1941,11 @@ def create_excel_output(
     n_days,
 ):
 
-    if "KGDM3_Puanlama" in wb.sheetnames:
+    if (
+        "KGDM3_Puanlama"
+        in wb.sheetnames
+    ):
+
         del wb["KGDM3_Puanlama"]
 
     ws_scores = wb.create_sheet(
@@ -1777,52 +1957,50 @@ def create_excel_output(
         "Valör",
 
         "Hibrit Skor",
-        "KGDM Skor",
-        "KAZRİSK Skor",
-        "Kalıcılık Skoru",
+        "Momentum Skor",
+        "Güvenlik Skor",
 
-        "Son 5 Hibrit Skor",
-        "Son Skor",
-        "Skor Trend",
+        "Son 5 Skor",
         "Model Kararı",
 
         "Ort. Günlük Getiri (%)",
         "Volatilite (%)",
-        "Risk Düzeltilmiş Skor",
-        "Kümülatif Getiri (%)",
+        "Sharpe",
 
+        "Kümülatif Getiri (%)",
         "MaxDD (%)",
 
         "En Büyük Varlık (%)",
-        "KAZRİSK Likidite Skoru",
+        "BIST30",
+        "Nakit Verisi",
+        "KAZRİSK",
 
         "AUM Değişim (%)",
         "Yatırımcı Değişim (%)",
 
-        "Fon Büyüklüğü (AUM ₺)",
-        "Yatırımcı Sayısı",
+        "AUM (₺)",
+        "Yatırımcı",
 
         "Haftalık Bileşik Getiri (%)",
+        "Veri Kaynağı",
     ]
 
-    for day in range(1, n_days + 1):
+    for day in calculated_funds[0]["dates"]:
 
         headers.append(
-            f"Gün {day} Hibrit Skor"
+            f"{day} Hibrit Skor"
         )
 
-    for day in range(1, n_days + 1):
+    for day in calculated_funds[0]["dates"]:
 
         headers.append(
-            f"Gün {day} Getiri"
+            f"{day} Getiri"
         )
 
-    ws_scores.append(
-        headers
-    )
+    ws_scores.append(headers)
 
     # --------------------------------------------------------
-    # HEADER
+    # Header
     # --------------------------------------------------------
 
     header_fill = PatternFill(
@@ -1847,184 +2025,234 @@ def create_excel_output(
             wrap_text=True,
         )
 
-    ws_scores.row_dimensions[
-        1
-    ].height = 45
+    ws_scores.row_dimensions[1].height = 42
 
     # --------------------------------------------------------
-    # SATIRLAR
+    # Satırlar
     # --------------------------------------------------------
 
     for item in calculated_funds:
 
-        risk_adj = risk_adjusted_score(
-            item["daily_returns"]
+        top_asset = item.get(
+            "top_asset_weight"
         )
 
-        cumulative = compound_return(
-            item["daily_returns"]
-        )
+        if top_asset is None:
 
-        liquidity = liquidity_score(
-            item
-        )
-
-        persistence_score = (
-            clamp(
-                50.0
-                + item.get(
-                    "score_trend",
-                    0.0
-                ) * 5.0
+            risk_label = (
+                "⚪ Veri Yok"
             )
+
+        elif top_asset > 30:
+
+            risk_label = (
+                "⚠️ Yüksek Konsantrasyon"
+            )
+
+        elif top_asset > 15:
+
+            risk_label = (
+                "🟡 Orta Konsantrasyon"
+            )
+
+        else:
+
+            risk_label = (
+                "🛡️ Dengeli"
+            )
+
+        cash_known = item.get(
+            "cash_ratio_known",
+            False,
         )
+
+        if cash_known:
+
+            cash_label = (
+                f"%{safe_float(item.get('emergency_cash_ratio')):.2f}"
+            )
+
+        else:
+
+            cash_label = (
+                "Veri Yok"
+            )
 
         row_data = [
+
             item["code"],
-            item["valor"],
 
-            item["kgdm_skor"],
             item.get(
-                "kgdm_component",
-                0.0,
-            ),
-            item.get(
-                "kazrisk_component",
-                0.0,
-            ),
-            round(
-                persistence_score,
-                1,
-            ),
-
-            item["last_5_scores_str"],
-            item.get(
-                "last_score",
+                "valor",
                 0,
             ),
-            round(
+
+            item.get(
+                "kgdm_skor"
+            ),
+
+            (
                 item.get(
-                    "score_trend",
-                    0.0,
-                ),
-                1,
-            ),
-            item["karar"],
-
-            round(
-                sum(
-                    item["daily_returns"]
+                    "running_momentum",
+                    []
+                )[-1]
+                if item.get(
+                    "running_momentum"
                 )
-                / len(
-                    item["daily_returns"]
+                else None
+            ),
+
+            item.get(
+                "security_score"
+            ),
+
+            item.get(
+                "last_5_scores_str",
+                "-",
+            ),
+
+            item.get(
+                "karar",
+                "-",
+            ),
+
+            round(
+                safe_float(
+                    item.get(
+                        "mean_return"
+                    )
                 ),
                 4,
             ),
 
             round(
-                (
-                    sum(
-                        (
-                            r
-                            - (
-                                sum(
-                                    item[
-                                        "daily_returns"
-                                    ]
-                                )
-                                / len(
-                                    item[
-                                        "daily_returns"
-                                    ]
-                                )
-                            )
-                        ) ** 2
-                        for r in item[
-                            "daily_returns"
-                        ]
+                safe_float(
+                    item.get(
+                        "volatility"
                     )
-                    / len(
-                        item[
-                            "daily_returns"
-                        ]
+                ),
+                4,
+            ),
+
+            round(
+                safe_float(
+                    item.get(
+                        "sharpe_like"
                     )
+                ),
+                4,
+            ),
+
+            round(
+                safe_float(
+                    item.get(
+                        "cumulative_return"
+                    )
+                ),
+                4,
+            ),
+
+            round(
+                safe_float(
+                    item.get("max_dd")
+                ),
+                4,
+            ),
+
+            (
+                round(
+                    safe_float(
+                        top_asset
+                    ),
+                    2,
                 )
-                ** 0.5,
-                4,
+                if top_asset is not None
+                else None
             ),
 
+            (
+                "EVET"
+                if item.get(
+                    "is_bist30",
+                    False,
+                )
+                else "HAYIR / YOK"
+            ),
+
+            cash_label,
+
+            risk_label,
+
             round(
-                risk_adj,
+                safe_float(
+                    item.get(
+                        "aum_change"
+                    )
+                ),
                 2,
             ),
 
             round(
-                cumulative,
-                4,
-            ),
-
-            round(
-                item["max_dd"],
-                2,
-            ),
-
-            round(
-                item[
-                    "top_asset_weight"
-                ],
-                2,
-            ),
-
-            round(
-                liquidity,
-                2,
-            ),
-
-            round(
-                item["aum_change"],
-                2,
-            ),
-
-            round(
-                item["inv_change"],
+                safe_float(
+                    item.get(
+                        "inv_change"
+                    )
+                ),
                 2,
             ),
 
             (
                 round(
-                    item["aum"],
+                    safe_float(
+                        item.get("aum")
+                    ),
                     2,
                 )
-                if item["aum"]
+                if item.get("aum")
                 else None
             ),
 
             (
                 int(
-                    item["investors"]
+                    item.get(
+                        "investors"
+                    )
                 )
-                if item["investors"]
+                if item.get(
+                    "investors"
+                )
                 else None
             ),
 
             round(
-                item[
-                    "weekly_return"
-                ],
+                safe_float(
+                    item.get(
+                        "weekly_return"
+                    )
+                ),
                 4,
+            ),
+
+            item.get(
+                "source",
+                "-",
             ),
         ]
 
         row_data.extend(
-            item["running_scores"]
+            item.get(
+                "running_scores",
+                [],
+            )
         )
 
         row_data.extend(
             [
-                format_percent(value)
-                for value in item[
-                    "daily_returns"
-                ]
+                format_percent(x)
+                for x in item.get(
+                    "daily_returns",
+                    [],
+                )
             ]
         )
 
@@ -2033,7 +2261,7 @@ def create_excel_output(
         )
 
     # --------------------------------------------------------
-    # KARAR RENKLERİ
+    # Renklendirme
     # --------------------------------------------------------
 
     green_font = Font(
@@ -2059,7 +2287,7 @@ def create_excel_output(
         decision_cell = (
             ws_scores.cell(
                 row=row_number,
-                column=10,
+                column=7,
             )
         )
 
@@ -2070,7 +2298,6 @@ def create_excel_output(
         if (
             "GÜÇLÜ AL"
             in decision_text
-            or decision_text == "AL"
             or "ASIL LİSTE"
             in decision_text
         ):
@@ -2098,7 +2325,7 @@ def create_excel_output(
             )
 
     # --------------------------------------------------------
-    # HİBRİT SKOR KOŞULLU FORMAT
+    # Hibrit skor conditional formatting
     # --------------------------------------------------------
 
     score_range = (
@@ -2121,19 +2348,7 @@ def create_excel_output(
         score_range,
         CellIsRule(
             operator="between",
-            formula=["60", "74.99"],
-            fill=PatternFill(
-                start_color="EAF4E3",
-                fill_type="solid",
-            ),
-        ),
-    )
-
-    ws_scores.conditional_formatting.add(
-        score_range,
-        CellIsRule(
-            operator="between",
-            formula=["45", "59.99"],
+            formula=["50", "74"],
             fill=PatternFill(
                 start_color=COLOR_LIGHT_YELLOW,
                 fill_type="solid",
@@ -2145,7 +2360,7 @@ def create_excel_output(
         score_range,
         CellIsRule(
             operator="lessThan",
-            formula=["45"],
+            formula=["50"],
             fill=PatternFill(
                 start_color=COLOR_LIGHT_RED,
                 fill_type="solid",
@@ -2154,8 +2369,45 @@ def create_excel_output(
     )
 
     # --------------------------------------------------------
-    # SAYFA STİL
+    # Formatlar
     # --------------------------------------------------------
+
+    for row_number in range(
+        2,
+        ws_scores.max_row + 1,
+    ):
+
+        ws_scores.cell(
+            row=row_number,
+            column=19,
+        ).number_format = (
+            '#,##0.00 "₺"'
+        )
+
+        ws_scores.cell(
+            row=row_number,
+            column=20,
+        ).number_format = (
+            '#,##0'
+        )
+
+        for col in [
+            8,
+            9,
+            11,
+            12,
+            13,
+            17,
+            18,
+            21,
+        ]:
+
+            ws_scores.cell(
+                row=row_number,
+                column=col,
+            ).number_format = (
+                '0.00"%"'
+            )
 
     style_excel_sheet(
         ws_scores
@@ -2172,10 +2424,6 @@ def create_excel_output(
     auto_fit_columns(
         ws_list
     )
-
-    # --------------------------------------------------------
-    # ÇIKTI
-    # --------------------------------------------------------
 
     output = io.BytesIO()
 
@@ -2193,7 +2441,7 @@ def create_excel_output(
 # ============================================================
 
 st.subheader(
-    "📂 Portföy Excel Listesi Seçimi"
+    "📂 Portföy Excel Listesi"
 )
 
 col_upload, col_github = st.columns(
@@ -2203,10 +2451,9 @@ col_upload, col_github = st.columns(
 wb = None
 source_mode = None
 
-
-# ============================================================
-# DOSYA YÜKLEME
-# ============================================================
+# ------------------------------------------------------------
+# Upload
+# ------------------------------------------------------------
 
 with col_upload:
 
@@ -2228,13 +2475,13 @@ with col_upload:
         except Exception as exc:
 
             st.error(
-                f"Hata: {exc}"
+                f"Excel yükleme hatası: {exc}"
             )
 
 
-# ============================================================
-# GITHUB
-# ============================================================
+# ------------------------------------------------------------
+# GitHub
+# ------------------------------------------------------------
 
 with col_github:
 
@@ -2249,38 +2496,43 @@ with col_github:
 
         try:
 
-            gh_response = requests.get(
+            response = requests.get(
                 GITHUB_EXCEL_URL,
                 timeout=HTTP_TIMEOUT,
             )
 
-            gh_response.raise_for_status()
+            response.raise_for_status()
 
             wb = openpyxl.load_workbook(
                 io.BytesIO(
-                    gh_response.content
+                    response.content
                 )
             )
 
             source_mode = "github"
 
             st.success(
-                "✅ Excel dosyası başarıyla indirildi!"
+                "✅ Excel dosyası başarıyla indirildi."
             )
 
         except Exception as exc:
 
             st.error(
-                f"Bağlantı hatası: {exc}"
+                f"GitHub bağlantı hatası: {exc}"
             )
 
 
 if wb is None:
+
+    st.info(
+        "Analize başlamak için Excel dosyanızı yükleyin."
+    )
+
     st.stop()
 
 
 # ============================================================
-# FON LİSTESİ SAYFASI
+# FON LİSTESİ
 # ============================================================
 
 if "Fon_Listesi" in wb.sheetnames:
@@ -2293,8 +2545,8 @@ else:
 
     ws_list = wb.active
 
-
 requested_codes = []
+
 excel_valor_dict = {}
 
 
@@ -2303,10 +2555,10 @@ for row in ws_list.iter_rows(
     values_only=False,
 ):
 
-    if (
-        not row
-        or row[0].value is None
-    ):
+    if not row:
+        continue
+
+    if row[0].value is None:
         continue
 
     code = normalize_fund_code(
@@ -2320,35 +2572,34 @@ for row in ws_list.iter_rows(
         code
     )
 
+    # Valör 4. kolon
     try:
 
-        valor_cell = (
-            row[3].value
-            if len(row) > 3
-            else 0
-        )
+        if len(row) > 3:
 
-        parsed_valor = parse_number(
-            valor_cell
-        )
-
-        excel_valor_dict[
-            code
-        ] = (
-            int(
-                round(
-                    parsed_valor
-                )
+            valor = parse_number(
+                row[3].value
             )
-            if parsed_valor is not None
-            else 0
-        )
+
+            excel_valor_dict[
+                code
+            ] = (
+                valor
+                if valor is not None
+                else 0.0
+            )
+
+        else:
+
+            excel_valor_dict[
+                code
+            ] = 0.0
 
     except Exception:
 
         excel_valor_dict[
             code
-        ] = 0
+        ] = 0.0
 
 
 requested_codes = list(
@@ -2361,7 +2612,7 @@ requested_codes = list(
 if not requested_codes:
 
     st.error(
-        "Fon_Listesi sayfasında geçerli fon kodu bulunamadı."
+        "Fon_Listesi sayfasında fon kodu bulunamadı."
     )
 
     st.stop()
@@ -2374,8 +2625,8 @@ if not requested_codes:
 today = dt.date.today()
 
 start_date = (
-    today
-    - dt.timedelta(
+    today -
+    dt.timedelta(
         days=LOOKBACK_CALENDAR_DAYS
     )
 )
@@ -2386,7 +2637,7 @@ start_date = (
 # ============================================================
 
 with st.spinner(
-    "🔄 TEFAS fon evreni alınıyor..."
+    "🔄 TEFAS verileri alınıyor..."
 ):
 
     universe = fetch_tefas_universe(
@@ -2396,7 +2647,7 @@ with st.spinner(
 
 
 # ============================================================
-# FON VERİLERİ
+# FONLARIN HESAPLANMASI
 # ============================================================
 
 calculated_funds = []
@@ -2405,7 +2656,7 @@ failed_codes = []
 
 progress = st.progress(
     0,
-    text="Fonlar analiz ediliyor...",
+    text="Fonlar analiz ediliyor..."
 )
 
 total_funds = len(
@@ -2434,41 +2685,59 @@ for index, code in enumerate(
             code
         )
 
-    else:
-
-        weekly_ok = (
-            metrics["weekly_return"]
-            >= TARGET_WEEKLY_RETURN
+        progress.progress(
+            index / total_funds,
+            text=f"{code}: veri yok",
         )
+
+        continue
+
+    metrics["code"] = code
+
+    metrics["valor"] = (
+        excel_valor_dict.get(
+            code,
+            0.0,
+        )
+    )
+
+    metrics["source"] = source
+
+    # --------------------------------------------------------
+    # Filtre
+    # --------------------------------------------------------
+
+    if ENABLE_FILTERS:
 
         investor_ok = (
             metrics["investors"]
             >= MIN_INVESTOR_COUNT
         )
 
-        if (
-            not ENABLE_FILTERS
-            or (
-                weekly_ok
-                and investor_ok
-            )
+        weekly_ok = (
+            metrics["weekly_return"]
+            >= TARGET_WEEKLY_RETURN
+        )
+
+        if not (
+            investor_ok
+            and weekly_ok
         ):
 
-            calculated_funds.append(
-                {
-                    "code": code,
-                    "valor": excel_valor_dict.get(
-                        code,
-                        0,
-                    ),
-                    "source": source,
-                    **metrics,
-                }
+            progress.progress(
+                index / total_funds,
+                text=f"{code}: filtre dışı",
             )
+
+            continue
+
+    calculated_funds.append(
+        metrics
+    )
 
     progress.progress(
         index / total_funds,
-        text=f"{code} analiz edildi...",
+        text=f"{code}: analiz edildi",
     )
 
 
@@ -2503,381 +2772,67 @@ n_days = min(
     for item in calculated_funds
 )
 
-
 if n_days < 2:
 
     st.error(
-        "Fonların ortak analiz edilebileceği yeterli veri günü yok."
+        "Fonlarda yeterli tarihsel veri bulunmuyor."
     )
 
     st.stop()
 
 
-for item in calculated_funds:
-
-    item["dates"] = (
-        item["dates"][-n_days:]
-    )
-
-    item["daily_returns"] = (
-        item["daily_returns"][-n_days:]
-    )
-
-    item["prices"] = (
-        item["prices"][
-            -(n_days + 1):
-        ]
-    )
-
-    item["running_scores"] = []
-    item["running_kgdm"] = []
-    item["running_kazrisk"] = []
-
-
 # ============================================================
-# KGDM + KAZRİSK V2 HİBRİT SKORLAMA
+# HİBRİT SKOR MOTORU
 # ============================================================
 
-for d in range(
-    1,
-    n_days + 1,
+with st.spinner(
+    "📊 KGDM-3 + KAZRİSK hibrit skoru hesaplanıyor..."
 ):
 
-    # --------------------------------------------------------
-    # O GÜNE KADAR OLAN VERİDEN GEÇİCİ HAVUZ
-    # --------------------------------------------------------
-
-    daily_pool = []
-
-    for original in calculated_funds:
-
-        temp = dict(
-            original
-        )
-
-        temp["daily_returns"] = (
-            original[
-                "daily_returns"
-            ][:d]
-        )
-
-        temp["prices"] = (
-            original[
-                "prices"
-            ][:d + 1]
-        )
-
-        daily_pool.append(
-            temp
-        )
-
-    # --------------------------------------------------------
-    # HER FON
-    # --------------------------------------------------------
-
-    for i, item in enumerate(
+    n_days = calculate_hybrid_scores(
         calculated_funds
-    ):
-
-        current = daily_pool[i]
-
-        # KGDM
-        kgdm = calculate_kgdm_score(
-            current,
-            daily_pool,
-        )
-
-        # KAZRİSK
-        kazrisk = (
-            calculate_kazrisk_score(
-                current
-            )
-        )
-
-        # ----------------------------------------------------
-        # KALICILIK
-        # ----------------------------------------------------
-        # Günlük aşırı sıçramaların nihai skoru tek başına
-        # değiştirmemesi için 50 merkezli bir kalıcılık
-        # komponenti kullanılır.
-        #
-        # İlk günlerde yeterli geçmiş olmadığı için 50'ye
-        # yakın tutulur.
-
-        existing_scores = (
-            item["running_scores"]
-        )
-
-        if len(existing_scores) >= 3:
-
-            recent_mean = (
-                sum(
-                    existing_scores[-3:]
-                )
-                / 3.0
-            )
-
-            persistence = clamp(
-                recent_mean
-            )
-
-        elif existing_scores:
-
-            persistence = clamp(
-                sum(existing_scores)
-                / len(existing_scores)
-            )
-
-        else:
-
-            persistence = 50.0
-
-        # ----------------------------------------------------
-        # HİBRİT SKOR
-        # ----------------------------------------------------
-
-        hybrid = (
-            kgdm
-            * KGDM_WEIGHT
-
-            + kazrisk
-            * KAZRISK_WEIGHT
-
-            + persistence
-            * PERSISTENCE_WEIGHT
-        )
-
-        hybrid = int(
-            round(
-                clamp(
-                    hybrid,
-                    0.0,
-                    100.0,
-                )
-            )
-        )
-
-        item[
-            "running_kgdm"
-        ].append(
-            round(
-                kgdm,
-                1,
-            )
-        )
-
-        item[
-            "running_kazrisk"
-        ].append(
-            round(
-                kazrisk,
-                1,
-            )
-        )
-
-        item[
-            "running_scores"
-        ].append(
-            hybrid
-        )
+    )
 
 
 # ============================================================
-# NİHAİ FON SKORLARI
+# SON DÖNEM METRİKLERİ
 # ============================================================
 
 for item in calculated_funds:
 
-    scores = (
-        item["running_scores"]
+    metrics = calculate_window_metrics(
+        item["prices"],
+        item["daily_returns"],
+        min(
+            MIN_ROLLING_DAYS,
+            item["n_days"],
+        ),
     )
 
-    kgdm_scores = (
-        item["running_kgdm"]
-    )
+    if metrics is None:
 
-    kazrisk_scores = (
-        item["running_kazrisk"]
-    )
-
-    # --------------------------------------------------------
-    # SON 5
-    # --------------------------------------------------------
-
-    last_5 = (
-        scores[-5:]
-        if len(scores) >= 5
-        else scores
-    )
-
-    last_kgdm = (
-        kgdm_scores[-5:]
-        if len(kgdm_scores) >= 5
-        else kgdm_scores
-    )
-
-    last_kazrisk = (
-        kazrisk_scores[-5:]
-        if len(kazrisk_scores) >= 5
-        else kazrisk_scores
-    )
-
-    # --------------------------------------------------------
-    # ORTALAMALAR
-    # --------------------------------------------------------
-
-    item[
-        "kgdm_skor"
-    ] = int(
-        round(
-            sum(last_5)
-            / len(last_5)
-        )
-    )
-
-    item[
-        "kgdm_component"
-    ] = round(
-        sum(last_kgdm)
-        / len(last_kgdm),
-        1,
-    )
-
-    item[
-        "kazrisk_component"
-    ] = round(
-        sum(last_kazrisk)
-        / len(last_kazrisk),
-        1,
-    )
-
-    item[
-        "last_score"
-    ] = scores[-1]
-
-    # --------------------------------------------------------
-    # TREND
-    # --------------------------------------------------------
-
-    item[
-        "score_trend"
-    ] = (
-        item["last_score"]
-        - item["kgdm_skor"]
-    )
-
-    item[
-        "last_5_scores_str"
-    ] = " ➔ ".join(
-        str(s)
-        for s in last_5
-    )
-
-    # --------------------------------------------------------
-    # TEMEL METRİKLER
-    # --------------------------------------------------------
-
-    returns = item[
-        "daily_returns"
-    ]
-
-    item[
-        "mean_return"
-    ] = (
-        sum(returns)
-        / len(returns)
-        if returns
-        else 0.0
-    )
-
-    if len(returns) >= 2:
-
-        variance = sum(
-            (
-                r
-                - item[
-                    "mean_return"
-                ]
-            ) ** 2
-            for r in returns
-        ) / len(returns)
-
-        item[
-            "volatility"
-        ] = math.sqrt(
-            max(
-                0.0,
-                variance,
-            )
-        )
+        item["mean_return"] = 0.0
+        item["volatility"] = 0.0
+        item["sharpe_like"] = 0.0
+        item["cumulative_return"] = 0.0
 
     else:
 
-        item[
-            "volatility"
-        ] = 0.0
+        item["mean_return"] = (
+            metrics["mean_return"]
+        )
 
-    item[
-        "sharpe_like"
-    ] = risk_adjusted_score(
-        returns
-    )
+        item["volatility"] = (
+            metrics["volatility"]
+        )
 
-    item[
-        "cumulative_return"
-    ] = compound_return(
-        returns
-    )
+        item["sharpe_like"] = (
+            metrics["sharpe"]
+        )
 
-    # --------------------------------------------------------
-    # KALICILIK
-    # --------------------------------------------------------
-
-    item[
-        "persistence_score"
-    ] = clamp(
-        50.0
-        + item["score_trend"]
-        * 5.0
-    )
-
-    # --------------------------------------------------------
-    # KARAR
-    # --------------------------------------------------------
-
-    score = item[
-        "kgdm_skor"
-    ]
-
-    if score >= 75:
-
-        item[
-            "karar"
-        ] = "GÜÇLÜ AL"
-
-    elif score >= 60:
-
-        item[
-            "karar"
-        ] = "AL"
-
-    elif score >= 45:
-
-        item[
-            "karar"
-        ] = "ASIL LİSTE"
-
-    elif score >= 30:
-
-        item[
-            "karar"
-        ] = "DÜZELTME / İZLE"
-
-    else:
-
-        item[
-            "karar"
-        ] = "ACİL SAT"
+        item["cumulative_return"] = (
+            metrics["cumulative"]
+        )
 
 
 # ============================================================
@@ -2886,141 +2841,168 @@ for item in calculated_funds:
 
 calculated_funds.sort(
     key=lambda x: (
-        -x["kgdm_skor"],
-        -x.get(
-            "cumulative_return",
-            0.0,
+        -safe_float(
+            x.get("kgdm_skor")
         ),
-        -x.get(
-            "kazrisk_component",
-            0.0,
+        -safe_float(
+            x.get("cumulative_return")
         ),
     )
 )
 
 
 # ============================================================
-# EKRAN SONUÇLARI
+# SONUÇ TABLOSU
 # ============================================================
 
 display_rows = []
 
 for item in calculated_funds:
 
-    top_weight = safe_float(
-        item.get(
-            "top_asset_weight",
-            0.0,
-        )
+    top_asset = item.get(
+        "top_asset_weight"
     )
 
-    if top_weight > 30.0:
+    if top_asset is None:
 
         risk_status = (
-            "⚠️ Sığ / Yüksek Konsantrasyon"
+            "⚪ Veri Yok"
         )
 
-    elif top_weight > 0:
+    elif top_asset > 30:
 
         risk_status = (
-            "🟡 Kontrollü Konsantrasyon"
+            "⚠️ Yüksek Konsantrasyon"
+        )
+
+    elif top_asset > 15:
+
+        risk_status = (
+            "🟡 Orta Konsantrasyon"
         )
 
     else:
 
         risk_status = (
-            "✅ Normal"
+            "🛡️ Dengeli"
         )
 
     display_rows.append(
         {
-            "Fon Kodu": item[
-                "code"
-            ],
+            "Fon Kodu":
+                item["code"],
 
-            "Hibrit Skor": item[
-                "kgdm_skor"
-            ],
-
-            "KGDM": item.get(
-                "kgdm_component",
-                0,
-            ),
-
-            "KAZRİSK": item.get(
-                "kazrisk_component",
-                0,
-            ),
-
-            "Kalıcılık": item.get(
-                "persistence_score",
-                50,
-            ),
-
-            "Son Skor": item.get(
-                "last_score",
-                0,
-            ),
-
-            "Trend": round(
+            "Hibrit Skor":
                 item.get(
-                    "score_trend",
+                    "kgdm_skor"
+                ),
+
+            "Momentum":
+                (
+                    item.get(
+                        "running_momentum",
+                        []
+                    )[-1]
+                    if item.get(
+                        "running_momentum"
+                    )
+                    else None
+                ),
+
+            "Güvenlik":
+                item.get(
+                    "security_score"
+                ),
+
+            "Model Kararı":
+                item.get(
+                    "karar"
+                ),
+
+            "Ort. Günlük %":
+                round(
+                    safe_float(
+                        item.get(
+                            "mean_return"
+                        )
+                    ),
+                    3,
+                ),
+
+            "Sharpe":
+                round(
+                    safe_float(
+                        item.get(
+                            "sharpe_like"
+                        )
+                    ),
+                    3,
+                ),
+
+            "Kümülatif Getiri %":
+                round(
+                    safe_float(
+                        item.get(
+                            "cumulative_return"
+                        )
+                    ),
+                    3,
+                ),
+
+            "MaxDD %":
+                round(
+                    safe_float(
+                        item.get(
+                            "max_dd"
+                        )
+                    ),
+                    3,
+                ),
+
+            "En Büyük Varlık %":
+                (
+                    round(
+                        safe_float(
+                            top_asset
+                        ),
+                        2,
+                    )
+                    if top_asset is not None
+                    else None
+                ),
+
+            "KAZRİSK":
+                risk_status,
+
+            "Haftalık Bileşik %":
+                round(
+                    safe_float(
+                        item.get(
+                            "weekly_return"
+                        )
+                    ),
+                    3,
+                ),
+
+            "AUM ₺":
+                round(
+                    safe_float(
+                        item.get(
+                            "aum"
+                        )
+                    ),
                     0,
                 ),
-                1,
-            ),
 
-            "Model Kararı": item[
-                "karar"
-            ],
+            "Yatırımcı":
+                item.get(
+                    "investors"
+                ),
 
-            "Ort. Günlük %": round(
-                item[
-                    "mean_return"
-                ],
-                3,
-            ),
-
-            "Risk Düzeltilmiş": round(
-                item[
-                    "sharpe_like"
-                ],
-                2,
-            ),
-
-            "Kümülatif Getiri %": round(
-                item[
-                    "cumulative_return"
-                ],
-                3,
-            ),
-
-            "MaxDD %": round(
-                item[
-                    "max_dd"
-                ],
-                2,
-            ),
-
-            "En Büyük Varlık %": round(
-                item[
-                    "top_asset_weight"
-                ],
-                2,
-            ),
-
-            "KAZRİSK Güvenlik": risk_status,
-
-            "AUM ₺": round(
-                item[
-                    "aum"
-                ],
-                0,
-            ),
-
-            "Yatırımcı": item[
-                "investors"
-            ],
+            "Kaynak":
+                item.get(
+                    "source"
+                ),
         }
     )
 
@@ -3031,7 +3013,7 @@ df_display = pd.DataFrame(
 
 
 # ============================================================
-# EKRAN RENKLENDİRME
+# DATAFRAME RENKLENDİRME
 # ============================================================
 
 def color_cells(value):
@@ -3041,10 +3023,9 @@ def color_cells(value):
     if (
         "GÜÇLÜ AL"
         in text
-        or text == "AL"
         or "ASIL LİSTE"
         in text
-        or "Normal"
+        or "Dengeli"
         in text
     ):
 
@@ -3056,7 +3037,7 @@ def color_cells(value):
     if (
         "DÜZELTME"
         in text
-        or "Kontrollü"
+        or "Orta"
         in text
     ):
 
@@ -3068,7 +3049,7 @@ def color_cells(value):
     if (
         "ACİL SAT"
         in text
-        or "Sığ"
+        or "Yüksek"
         in text
     ):
 
@@ -3097,8 +3078,12 @@ except AttributeError:
     )
 
 
+# ============================================================
+# EKRAN
+# ============================================================
+
 st.subheader(
-    "📊 KGDM + KAZRİSK V2 Analiz Sonuçları"
+    "📊 Analiz Sonuçları"
 )
 
 st.dataframe(
@@ -3109,51 +3094,61 @@ st.dataframe(
 
 
 # ============================================================
-# MODEL AÇIKLAMASI
+# SKOR DAĞILIMI
 # ============================================================
 
-with st.expander(
-    "ℹ️ Skor Mantığını Gör"
-):
+st.subheader(
+    "📈 Skor Özeti"
+)
 
-    st.markdown(
-        """
-### Hibrit Skor
+col1, col2, col3, col4 = st.columns(
+    4
+)
 
-**Nihai Hibrit Skor =**
-
-- **%55 KGDM Momentum**
-- **%30 KAZRİSK Güvenlik/Likidite**
-- **%15 Kalıcılık**
-
-### KGDM
-
-- %30 Kümülatif getiri
-- %25 Risk-düzeltilmiş getiri
-- %15 Düşük volatilite avantajı
-- %15 Drawdown avantajı
-- %15 Son 3 günlük momentum
-
-### KAZRİSK
-
-- %35 Fon büyüklüğü / AUM
-- %25 Yatırımcı trendi
-- %20 Portföy konsantrasyonu
-- %20 Likidite / güvenlik
-
-### Karar Matrisi
-
-| Skor | Karar |
-|---:|---|
-| 75–100 | 🟢 GÜÇLÜ AL |
-| 60–74 | 🟢 AL |
-| 45–59 | 🟡 ASIL LİSTE |
-| 30–44 | 🟠 DÜZELTME / İZLE |
-| 0–29 | 🔴 ACİL SAT |
-
-**Not:** Skor göreli bir sıralama modelidir; yatırım tavsiyesi veya gelecekteki getirinin garantisi değildir.
-"""
+scores = [
+    safe_float(
+        x.get("kgdm_skor")
     )
+    for x in calculated_funds
+    if x.get("kgdm_skor") is not None
+]
+
+if scores:
+
+    with col1:
+
+        st.metric(
+            "En Yüksek Skor",
+            f"{max(scores):.0f}",
+        )
+
+    with col2:
+
+        st.metric(
+            "Ortalama Skor",
+            f"{sum(scores) / len(scores):.1f}",
+        )
+
+    with col3:
+
+        st.metric(
+            "En Düşük Skor",
+            f"{min(scores):.0f}",
+        )
+
+    with col4:
+
+        strong_count = sum(
+            1
+            for x in calculated_funds
+            if x.get("karar")
+            == "GÜÇLÜ AL"
+        )
+
+        st.metric(
+            "Güçlü Al",
+            strong_count,
+        )
 
 
 # ============================================================
@@ -3168,21 +3163,17 @@ output = create_excel_output(
 )
 
 
-# ============================================================
-# SONUÇ
-# ============================================================
-
 st.success(
-    "✅ Analiz tamamlandı. "
-    "KGDM + KAZRİSK V2 normalize hibrit skor motoru uygulandı."
+    f"✅ Analiz tamamlandı. "
+    f"{len(calculated_funds)} fon hesaplandı. "
+    f"Model sürümü: {APP_VERSION}"
 )
+
 
 st.download_button(
     label="📥 Güncellenmiş Hibrit Excel'i İndir",
     data=output,
-    file_name=(
-        "fonlar_KGDM_KAZRISK_V7.xlsx"
-    ),
+    file_name="fonlar_KGDM3_KAZRISK_V6_1.xlsx",
     mime=(
         "application/vnd.openxmlformats-officedocument."
         "spreadsheetml.sheet"
