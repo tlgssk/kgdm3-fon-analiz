@@ -29,7 +29,7 @@ st.set_page_config(
 st.title("📊 KGDM-3 & KAZRİSK® Hibrit Fon Analiz ve Excel Otomasyonu")
 st.caption(
     "TEFAS + İş Yatırım + TEFAS Direct API + Fintables/KAP | "
-    "Momentum + Risk + Likidite Hibrit Skor Motoru V7.0 (Piyasa-Bağıl)"
+    "Momentum + Risk + Likidite Hibrit Skor Motoru V7.1 (Piyasa-Bağıl)"
 )
 
 
@@ -46,11 +46,11 @@ MIN_ROLLING_DAYS = 5
 HTTP_TIMEOUT = 12
 MAX_WORKERS = 8
 
-MIN_REFERENCE_SAMPLE = 5  # bir kind için evren referansı kabul edilebilir minimum fon sayısı
+MIN_REFERENCE_SAMPLE = 5
 OVERHEAT_Z_THRESHOLD = 2.0
 OVERHEAT_PENALTY = 6.0
 
-APP_VERSION = "7.0.0"
+APP_VERSION = "7.1.0"
 
 GITHUB_OWNER = "tlgssk"
 GITHUB_REPO = "kgdm3-fon-analiz"
@@ -101,7 +101,7 @@ SECURITY_WEIGHTS = {
 SECURITY_SCALE = {
     "aum": 20.0,
     "investor": 20.0,
-    "aum_flow": 12.0,       # eski adı: aum_change — artık fiyat etkisinden arındırılmış
+    "aum_flow": 12.0,
     "investor_change": 8.0,
     "concentration": 20.0,
 }
@@ -123,7 +123,7 @@ HIGH_LIQUIDITY_BONUS = 5.0
 LOW_LIQUIDITY_PENALTY = 3.0
 POSITIVE_INVESTOR_FLOW_BONUS = 3.0
 
-EMA_DECAY = 0.65  # son-N skor ortalamasında yakın günlere üstel ağırlık
+EMA_DECAY = 0.65
 
 
 # ============================================================
@@ -359,10 +359,7 @@ def zscore_against_population(value: Optional[float], mean_v: float, std_v: floa
 def calculate_valor_penalty(excess_valor) -> float:
     """
     Ham valör yerine, fonun kendi türünün (kind) medyan valöründen
-    FAZLASI cezalandırılır — böylece bir fon türünde yapısal olarak
-    normal olan valör (örn. döviz/yurt dışı varlık içeren fonlar)
-    haksız yere cezalandırılmaz; sadece türüne göre ANORMAL uzun
-    valör puan kaybettirir.
+    FAZLASI cezalandırılır.
     """
     excess_valor = safe_float(excess_valor)
     if excess_valor <= 0:
@@ -438,8 +435,18 @@ def fetch_tefas_universe(start_date: dt.date, end_date: dt.date) -> pd.DataFrame
             df["date"] = pd.to_datetime(df["date"], errors="coerce")
         if "price" in df.columns:
             df["price"] = df["price"].apply(parse_number)
-        df["aum"] = df["aum"].apply(parse_number).fillna(0.0) if "aum" in df.columns else 0.0
-        df["investors"] = df["investors"].apply(parse_number).fillna(0.0) if "investors" in df.columns else 0.0
+
+        # DÜZELTME: her zaman Series olsun (skaler atama hatası giderildi)
+        if "aum" in df.columns:
+            df["aum"] = df["aum"].apply(parse_number).fillna(0.0)
+        else:
+            df["aum"] = 0.0
+
+        if "investors" in df.columns:
+            df["investors"] = df["investors"].apply(parse_number).fillna(0.0)
+        else:
+            df["investors"] = 0.0
+
         if "kind" not in df.columns:
             df["kind"] = DEFAULT_FUND_KIND
 
@@ -475,12 +482,6 @@ def build_fund_kind_map(universe: pd.DataFrame) -> Dict[str, str]:
 # ============================================================
 # EVREN REFERANS DAĞILIMI (Piyasa-Bağıl Skor için)
 # ============================================================
-# Kritik metodoloji düzeltmesi: momentum skorları artık SADECE
-# kullanıcının seçtiği listeye göre değil, TEFAS'taki AYNI TÜRDEKİ
-# (YAT/EMK/BYF) TÜM fonlara göre hesaplanır. Bu sayede:
-#  (a) mutlak karar eşikleri (75/50/35) anlamlı hale gelir — çünkü
-#      referans, kullanıcının hangi fonları seçtiğine bağlı değildir,
-#  (b) hisse/borçlanma/para piyasası fonları birbirine karıştırılmaz.
 
 def build_universe_reference(universe: pd.DataFrame, window: int) -> Dict[str, Dict[str, List[float]]]:
     reference: Dict[str, Dict[str, List[float]]] = {
@@ -513,7 +514,7 @@ def build_universe_reference(universe: pd.DataFrame, window: int) -> Dict[str, D
         reference[kind]["mean_return"].append(mean_return)
         reference[kind]["sharpe"].append(sharpe)
         reference[kind]["cumulative"].append(cumulative)
-        reference[kind]["max_dd_inv"].append(-max_dd)  # yüksek = iyi yönü
+        reference[kind]["max_dd_inv"].append(-max_dd)
 
     return reference
 
@@ -757,11 +758,7 @@ def compute_fund_metrics(series: Optional[pd.DataFrame], fund_code: str) -> Opti
     aum_change = ((aums[-1] / aums[0] - 1.0) * 100.0) if aums[0] > 0 else 0.0
     investor_change = ((investors[-1] / investors[0] - 1.0) * 100.0) if investors[0] > 0 else 0.0
 
-    # Fiyat etkisinden arındırılmış AUM değişimi (yaklaşık net akış proxy'si):
-    # AUM ~ fiyat x pay sayısı olduğundan, AUM'daki değişimin büyük kısmı
-    # sadece fiyat artışından kaynaklanabilir. Bu, momentum tarafında zaten
-    # ödüllendirilen bir etkidir; güvenlik/likidite tarafında AYNI etkiyi
-    # ikinci kez ödüllendirmemek için o dönemin fiyat getirisi düşülür.
+    # Fiyat etkisinden arındırılmış AUM değişimi (yaklaşık net akış proxy'si)
     price_return_same_window = ((prices[-1] / prices[0] - 1.0) * 100.0) if prices[0] > 0 else 0.0
     aum_flow_proxy = aum_change - price_return_same_window
 
@@ -821,31 +818,23 @@ def calculate_window_metrics(prices, returns, window) -> Optional[dict]:
     max_dd = calculate_max_drawdown(slice_prices)
 
     return {
-        "mean_return": mean_return, "volatility": volatility, "sharpe": sharpe_like,
-        "cumulative": cumulative_return, "max_dd": max_dd,
+        "mean_return": mean_return,
+        "volatility": volatility,
+        "sharpe": sharpe_like,
+        "cumulative": cumulative_return,
+        "max_dd": max_dd,
     }
 
 
 # ============================================================
-# GÜVENLİK / LİKİDİTE SKORU (kind-içi, referans-farkında)
+# GÜVENLİK / LİKİDİTE SKORU (kind-içi)
 # ============================================================
 
 def calculate_security_scores(funds: List[dict]) -> None:
-    """
-    NOT: Bu skor "güvenlik" değil, daha doğru adıyla "büyüklük/likidite
-    profili" skorudur — büyük AUM/yatırımcı tabanını likidite açısından
-    olumlu sayar, ancak bu her yatırımcı için evrensel bir "daha güvenli"
-    anlamına gelmez (küçük/çevik fonları tercih edenler için tam tersi
-    de savunulabilir). z-score'lar artık fon TÜRÜ (kind) içinde
-    hesaplanıyor — böylece örn. bir para piyasası fonunun AUM'u bir
-    hisse fonuyla aynı havuzda karşılaştırılmıyor.
-    """
     by_kind: Dict[str, List[int]] = defaultdict(list)
     for idx, fund in enumerate(funds):
         by_kind[fund.get("kind", DEFAULT_FUND_KIND)].append(idx)
 
-    # Kind-içi valör medyanı (yapısal olarak uzun valörü olan türleri
-    # haksız cezalandırmamak için)
     kind_valor_median: Dict[str, float] = {}
     for kind, indices in by_kind.items():
         valors = [safe_float(funds[i].get("valor")) for i in indices]
@@ -900,7 +889,7 @@ def calculate_security_scores(funds: List[dict]) -> None:
 
 
 # ============================================================
-# PİYASA-BAĞIL MOMENTUM SKORU (evren referanslı, kind-içi)
+# PİYASA-BAĞIL MOMENTUM SKORU
 # ============================================================
 
 def calculate_market_relative_momentum(
@@ -917,12 +906,14 @@ def calculate_market_relative_momentum(
             fund["market_momentum"] = None
             fund["overheat_flag"] = False
             fund["reference_scope"] = "Hesaplanamadı"
+            fund["volatility"] = None
             continue
 
         fund["_final_mean_return"] = metrics["mean_return"]
         fund["_final_sharpe"] = metrics["sharpe"]
         fund["_final_cumulative"] = metrics["cumulative"]
         fund["_final_max_dd"] = metrics["max_dd"]
+        fund["volatility"] = metrics["volatility"]  # DÜZELTME: volatility artık set ediliyor
 
         if sample_size >= MIN_REFERENCE_SAMPLE:
             ref = reference[kind]
@@ -938,16 +929,15 @@ def calculate_market_relative_momentum(
 
             fund["reference_scope"] = f"Piyasa ({kind}, n={sample_size})"
         else:
-            # Evren referansı yetersizse (örn. pytefas kurulu değil),
-            # o kind için tek çare olarak SEÇİLEN LİSTE içinde z-score'a
-            # düşülür — ama bu açıkça "kısmi/liste-bağıl" olarak işaretlenir.
             fallback_group = [f for f in funds if f.get("kind") == kind]
             z_mean = zscore([f.get("_final_mean_return") for f in fallback_group])
             z_sharpe = zscore([f.get("_final_sharpe") for f in fallback_group])
             z_cum = zscore([f.get("_final_cumulative") for f in fallback_group])
             z_dd = zscore([-safe_float(f.get("_final_max_dd")) for f in fallback_group])
             local_idx = fallback_group.index(fund)
-            z_mean, z_sharpe, z_cum, z_dd = z_mean[local_idx], z_sharpe[local_idx], z_cum[local_idx], z_dd[local_idx]
+            z_mean, z_sharpe, z_cum, z_dd = (
+                z_mean[local_idx], z_sharpe[local_idx], z_cum[local_idx], z_dd[local_idx]
+            )
             fund["reference_scope"] = "Liste-bağıl (yetersiz evren verisi)"
 
         weighted_z = (
@@ -958,11 +948,13 @@ def calculate_market_relative_momentum(
         )
         momentum_score = clamp(50.0 + 20.0 * weighted_z, 0.0, 100.0)
 
-        # Aşırı ısınma / geri dönüş riski: kümülatif getiri z-score'u
-        # referansa göre çok yüksekse VE son günün getirisi negatifse
-        # (ivme kaybı belirtisi), skor hafifçe düşürülür ve etiketlenir.
-        last_day_return = fund["daily_returns"][-1] if fund.get("daily_returns") else 0.0
-        overheat = z_cum >= OVERHEAT_Z_THRESHOLD and last_day_return < 0
+        # Aşırı ısınma: kümülatif z yüksek + son 1-2 günde ivme kaybı
+        daily_rets = fund.get("daily_returns") or []
+        last_day_return = daily_rets[-1] if daily_rets else 0.0
+        last_2_avg = (
+            sum(daily_rets[-2:]) / 2.0 if len(daily_rets) >= 2 else last_day_return
+        )
+        overheat = z_cum >= OVERHEAT_Z_THRESHOLD and (last_day_return < 0 or last_2_avg < 0)
         fund["overheat_flag"] = overheat
         if overheat:
             momentum_score = clamp(momentum_score - OVERHEAT_PENALTY, 0.0, 100.0)
@@ -971,17 +963,10 @@ def calculate_market_relative_momentum(
 
 
 # ============================================================
-# TREND SKORU (liste-içi günlük rolling — sadece görsel trend amaçlı)
+# TREND SKORU (liste-içi günlük rolling — görsel trend)
 # ============================================================
 
 def calculate_trend_scores(funds: List[dict]) -> int:
-    """
-    Bu skor kararı DEĞİL, "son günlerdeki seyri" göstermek içindir
-    (Excel'deki günlük hibrit skor sütunları ve "Son 5 Skor" alanı).
-    Karar (KARAR sütunu) artık `market_momentum` tabanlı
-    `decision_score`'dan üretilir — bkz. calculate_market_relative_momentum
-    ve finalize_decisions.
-    """
     if not funds:
         return 0
 
@@ -1044,9 +1029,6 @@ def calculate_trend_scores(funds: List[dict]) -> int:
             running_hybrid.append(int(round(clamp(hybrid, 0.0, 100.0))))
         fund["running_trend_hybrid"] = running_hybrid
 
-        # Son-N skorun ağırlıklı ortalaması artık DOĞRUSAL değil ÜSTEL
-        # (EMA-benzeri) ağırlıklandırılır: en yakın gün en yüksek ağırlığı
-        # alır, geçmişe gidildikçe ağırlık geometrik olarak azalır.
         valid_last = [s for s in running_hybrid if s is not None][-5:]
         fund["last_5_scores"] = valid_last
         fund["last_5_scores_str"] = " ➔ ".join(str(x) for x in valid_last) if valid_last else "-"
@@ -1063,7 +1045,7 @@ def calculate_trend_scores(funds: List[dict]) -> int:
 
 
 # ============================================================
-# NİHAİ KARAR (Piyasa-Bağıl Hibrit Skor üzerinden)
+# NİHAİ KARAR
 # ============================================================
 
 def finalize_decisions(funds: List[dict]) -> None:
@@ -1094,7 +1076,7 @@ def finalize_decisions(funds: List[dict]) -> None:
 
 
 # ============================================================
-# VERİ GÜVENİ (confidence) GÖSTERGESİ
+# VERİ GÜVENİ
 # ============================================================
 
 def compute_confidence_label(fund: dict) -> str:
@@ -1153,7 +1135,7 @@ PERCENT_COLUMNS = [
 ]
 
 
-def create_excel_output(wb, ws_list, all_funds_for_output):
+def create_excel_output(wb, ws_list, all_funds_for_output, common_n_days: int):
     if "KGDM3_Puanlama" in wb.sheetnames:
         del wb["KGDM3_Puanlama"]
 
@@ -1174,11 +1156,18 @@ def create_excel_output(wb, ws_list, all_funds_for_output):
         "Haftalık Bileşik Getiri (%)", "Veri Kaynağı",
     ]
 
+    # Ortak tarih listesi (eligible fonlardan)
     sample_dates = []
     for item in all_funds_for_output:
-        if item.get("dates"):
-            sample_dates = item["dates"]
+        if item.get("dates") and len(item["dates"]) >= common_n_days:
+            sample_dates = item["dates"][-common_n_days:]
             break
+    if not sample_dates:
+        # Yedek: herhangi bir eligible fon
+        for item in all_funds_for_output:
+            if item.get("dates"):
+                sample_dates = item["dates"]
+                break
 
     for day in sample_dates:
         headers.append(f"{day} Trend Hibrit Skor")
@@ -1241,16 +1230,21 @@ def create_excel_output(wb, ws_list, all_funds_for_output):
             item.get("source", "-"),
         ]
 
-        own_scores = item.get("running_trend_hybrid", [])
-        padded_scores = [None] * (len(sample_dates) - len(own_scores)) + own_scores
-        row_data.extend([s if s is not None else "" for s in padded_scores[-len(sample_dates):]] if sample_dates else [])
+        # Ortak uzunluğa pad (Excel hizalaması düzeltmesi)
+        n_dates = len(sample_dates)
+        own_scores = item.get("running_trend_hybrid") or []
+        if len(own_scores) < n_dates:
+            own_scores = [None] * (n_dates - len(own_scores)) + own_scores
+        else:
+            own_scores = own_scores[-n_dates:]
+        row_data.extend([s if s is not None else "" for s in own_scores])
 
-        own_returns = item.get("daily_returns", [])
-        padded_returns = [None] * (len(sample_dates) - len(own_returns)) + own_returns
-        row_data.extend(
-            [format_percent(x) if x is not None else "-" for x in padded_returns[-len(sample_dates):]]
-            if sample_dates else []
-        )
+        own_returns = item.get("daily_returns") or []
+        if len(own_returns) < n_dates:
+            own_returns = [None] * (n_dates - len(own_returns)) + own_returns
+        else:
+            own_returns = own_returns[-n_dates:]
+        row_data.extend([format_percent(x) if x is not None else "-" for x in own_returns])
 
         ws_scores.append(row_data)
 
@@ -1505,17 +1499,14 @@ if not eligible_funds:
 
 
 # ============================================================
-# SKORLAMA: GÜVENLİK → PİYASA-BAĞIL MOMENTUM → TREND → KARAR
+# SKORLAMA
 # ============================================================
 
 with st.spinner("📊 KGDM-3 + KAZRİSK hibrit skoru hesaplanıyor..."):
     calculate_security_scores(eligible_funds)
     calculate_market_relative_momentum(eligible_funds, universe_reference, final_window=TARGET_TRADING_DAYS)
-    calculate_trend_scores(eligible_funds)
+    common_n_days = calculate_trend_scores(eligible_funds)
     finalize_decisions(eligible_funds)
-
-    for f in eligible_funds:
-        f["volatility"] = None  # ayrı gösterilmiyor; final pencere zaten _final_* alanlarında
 
 all_funds_for_output = eligible_funds + insufficient_funds
 
@@ -1574,7 +1565,7 @@ df_display = pd.DataFrame(display_rows)
 
 def color_cells(value):
     text = str(value)
-    if "GÜÇLÜ AL" in text or "ASIL LİSTE" in text or "Dengeli" in text or "Yüksek" in text and "🟢" in text:
+    if "GÜÇLÜ AL" in text or "ASIL LİSTE" in text or "Dengeli" in text or ("Yüksek" in text and "🟢" in text):
         return "color: #008000; font-weight: bold;"
     if "DÜZELTME" in text or "Orta" in text:
         return "color: #B8860B; font-weight: bold;"
@@ -1622,7 +1613,7 @@ overheat_count = sum(1 for x in all_funds_for_output if x.get("overheat_flag"))
 if overheat_count:
     st.info(
         f"🔥 {overheat_count} fon 'aşırı ısınma' uyarısı taşıyor — kısa vadede "
-        "hızla yükselmiş ve son gün ivme kaybetmeye başlamış olabilir; bu "
+        "hızla yükselmiş ve son günlerde ivme kaybetmeye başlamış olabilir; bu "
         "fonlarda geri dönüş (mean-reversion) riski daha yüksek olabilir."
     )
 
@@ -1631,7 +1622,12 @@ if overheat_count:
 # EXCEL ÇIKTISI
 # ============================================================
 
-output = create_excel_output(wb=wb, ws_list=ws_list, all_funds_for_output=all_funds_for_output)
+output = create_excel_output(
+    wb=wb,
+    ws_list=ws_list,
+    all_funds_for_output=all_funds_for_output,
+    common_n_days=common_n_days,
+)
 
 st.success(
     f"✅ Analiz tamamlandı. {len(all_funds_for_output)} fon işlendi "
@@ -1642,6 +1638,6 @@ st.success(
 st.download_button(
     label="📥 Güncellenmiş Hibrit Excel'i İndir",
     data=output,
-    file_name="fonlar_KGDM3_KAZRISK_V7_0.xlsx",
+    file_name="fonlar_KGDM3_KAZRISK_V7_1.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
