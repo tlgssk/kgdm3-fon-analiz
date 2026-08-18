@@ -285,6 +285,7 @@ def request_with_status(
     *,
     params: Optional[dict] = None,
     data: Optional[dict] = None,
+    json_body: Optional[dict] = None,
     headers: Optional[dict] = None,
     timeout: int = HTTP_TIMEOUT,
 ) -> Tuple[Optional[requests.Response], SourceStatus]:
@@ -300,6 +301,7 @@ def request_with_status(
             url=url,
             params=params,
             data=data,
+            json=json_body,
             headers=headers,
             timeout=timeout,
         )
