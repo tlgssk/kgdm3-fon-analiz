@@ -1206,16 +1206,213 @@ def fetch_tefas_direct_api(
     show_spinner=False,
     ttl=60 * 60 * 2,
 )
+
+@st.cache_data(
+    show_spinner=False,
+    ttl=60 * 60 * 2,
+)
+def fetch_tefas_breakdown_snapshot(
+    fund_kind: Optional[str],
+    reference_date: Optional[str],
+) -> dict:
+    """
+    TEFAS'ın yeni resmi JSON portföy dağılımı endpoint'inden tek tarih /
+    fon tipi için toplu snapshot alır.
+
+    Aynı snapshot tüm fonlar tarafından paylaşıldığı için 670 fon için
+    670 ayrı HTTP isteği yapılmaz; fon tipi başına cache'lenmiş tek istek
+    kullanılır.
+    """
+    kind = (fund_kind or "YAT").upper()
+    if kind not in ("YAT", "EMK", "BYF", "GYF", "GSYF"):
+        kind = "YAT"
+
+    if reference_date:
+        try:
+            ref = pd.to_datetime(reference_date).date()
+        except Exception:
+            ref = dt.date.today()
+    else:
+        ref = dt.date.today()
+
+    # TEFAS resmi endpoint'i yaklaşık bir aylık aralık kabul ediyor.
+    # Burada tek gün sorguladığımız için aralık problemi yok.
+    url = "https://www.tefas.gov.tr/api/funds/dagilimSiraliGetirT"
+
+    body = {
+        "fonTipi": kind,
+        "fonKodu": None,
+        "aramaMetni": None,
+        "fonTurKod": None,
+        "fonGrubu": None,
+        "sfonTurKod": None,
+        "fonTurAciklama": None,
+        "kurucuKod": None,
+        "basTarih": ref.strftime("%Y%m%d"),
+        "bitTarih": ref.strftime("%Y%m%d"),
+        "basSira": 1,
+        "bitSira": 100000,
+        "dil": "TR",
+        "sFonTurKod": "",
+        "fonKod": "",
+        "fonGrup": "",
+        "fonUnvanTip": "",
+    }
+
+    response, status = request_with_status(
+        "TEFAS Direct Structural API",
+        "POST",
+        url,
+        json_body=body,
+        headers={
+            "Accept": "*/*",
+            "Content-Type": "application/json",
+            "Origin": "https://www.tefas.gov.tr",
+            "Referer": "https://www.tefas.gov.tr/tr/fon-verileri",
+        },
+        timeout=max(HTTP_TIMEOUT, 30),
+    )
+
+    if response is None or not status.ok:
+        return {
+            "ok": False,
+            "source": "TEFAS Direct Structural API",
+            "date": ref.isoformat(),
+            "kind": kind,
+            "error": f"{status.error_type}: {status.message}",
+            "rows": {},
+        }
+
+    try:
+        payload = response.json()
+    except Exception as exc:
+        return {
+            "ok": False,
+            "source": "TEFAS Direct Structural API",
+            "date": ref.isoformat(),
+            "kind": kind,
+            "error": f"JSON_PARSE_ERROR: {str(exc)[:180]}",
+            "rows": {},
+        }
+
+    err_code = payload.get("errorCode")
+    err_msg = payload.get("errorMessage")
+    if err_code or err_msg:
+        return {
+            "ok": False,
+            "source": "TEFAS Direct Structural API",
+            "date": ref.isoformat(),
+            "kind": kind,
+            "error": f"TEFAS_API_ERROR: {err_msg or err_code}",
+            "rows": {},
+        }
+
+    result_list = payload.get("resultList") or []
+    rows = {}
+
+    # TEFAS API kısa alanları -> anlamlı yüzde alanları.
+    field_map = {
+        "hs": "stock_pct",
+        "dt": "government_bond_pct",
+        "hb": "treasury_bill_pct",
+        "fb": "financing_bill_pct",
+        "ost": "private_sector_bond_pct",
+        "bb": "bank_bill_pct",
+        "vdm": "asset_backed_securities_pct",
+        "eut": "eurobond_pct",
+        "kibd": "government_external_debt_pct",
+        "osdb": "private_sector_external_debt_pct",
+        "kba": "fx_government_internal_debt_pct",
+        "dot": "fx_payable_bill_pct",
+        "db": "fx_payable_bond_pct",
+        "tpp": "takasbank_money_market_pct",
+        "bpp": "bist_money_market_pct",
+        "btaa": "bist_committed_buy_pct",
+        "btas": "bist_committed_sell_pct",
+        "r": "repo_pct",
+        "tr": "reverse_repo_pct",
+        "vm": "term_deposit_pct",
+        "vmtl": "deposit_tl_pct",
+        "vmd": "deposit_fx_pct",
+        "vmau": "deposit_gold_pct",
+        "kh": "participation_account_pct",
+        "khtl": "participation_account_tl_pct",
+        "khd": "participation_account_fx_pct",
+        "khau": "participation_account_gold_pct",
+        "kks": "government_lease_certificate_pct",
+        "kkstl": "government_lease_certificate_tl_pct",
+        "kksd": "government_lease_certificate_fx_pct",
+        "kksyd": "government_foreign_lease_certificate_pct",
+        "osks": "private_sector_lease_certificate_pct",
+        "oksyd": "private_sector_foreign_lease_certificate_pct",
+        "km": "precious_metals_pct",
+        "kmbyf": "precious_metals_etf_pct",
+        "kmkba": "precious_metals_government_debt_pct",
+        "kmkks": "precious_metals_lease_certificate_pct",
+        "ymk": "foreign_security_pct",
+        "yba": "foreign_debt_security_pct",
+        "ybkb": "foreign_government_debt_pct",
+        "ybosb": "foreign_private_sector_debt_pct",
+        "yhs": "foreign_stock_pct",
+        "ybyf": "foreign_etf_pct",
+        "fkb": "fund_participation_certificate_pct",
+        "yyf": "investment_fund_pct",
+        "byf": "etf_pct",
+        "gykb": "real_estate_fund_pct",
+        "gyy": "real_estate_investment_pct",
+        "gsykb": "venture_capital_fund_pct",
+        "gsyy": "venture_capital_investment_pct",
+        "t": "derivative_pct",
+        "vint": "futures_cash_collateral_pct",
+        "gas": "real_estate_certificate_pct",
+        "d": "other_pct",
+    }
+
+    for row in result_list:
+        code = normalize_fund_code(
+            row.get("fonKodu")
+            or row.get("fonKod")
+        )
+        if not code:
+            continue
+
+        parsed = {
+            "fund_code": code,
+            "fund_name": row.get("fonUnvan"),
+            "date": row.get("tarih"),
+        }
+
+        for short, target in field_map.items():
+            parsed[target] = parse_number(row.get(short))
+
+        rows[code] = parsed
+
+    return {
+        "ok": bool(rows),
+        "source": "TEFAS Direct Structural API",
+        "date": ref.isoformat(),
+        "kind": kind,
+        "error": "" if rows else "NO_STRUCTURAL_ROWS",
+        "rows": rows,
+    }
+
+
+@st.cache_data(
+    show_spinner=False,
+    ttl=60 * 60 * 2,
+)
 def fetch_fund_structural_data(
     fund_code: str,
     fund_kind: Optional[str] = None,
     fund_title: Optional[str] = None,
+    reference_date: Optional[str] = None,
 ) -> dict:
 
     code = normalize_fund_code(fund_code)
 
     structural = {
         "top_asset_weight": None,
+        "top_asset_weight_basis": None,
         "is_bist30": False,
         "is_bist30_known": False,
         "emergency_cash_ratio": None,
@@ -1224,82 +1421,185 @@ def fetch_fund_structural_data(
         "structural_source": "YOK",
         "structural_estimated": False,
         "structural_error": "",
-        "fund_title": (
-            fund_title
-            if fund_title
-            else None
-        ),
+        "structural_date": reference_date,
+        "fund_title": fund_title if fund_title else None,
         "investment_area": None,
         "investment_area_source": "YOK",
     }
 
     if not code:
-        structural["structural_error"] = (
-            "Geçersiz fon kodu"
-        )
+        structural["structural_error"] = "Geçersiz fon kodu"
         return structural
 
     # --------------------------------------------------------
-    # BAŞLIKTAN SADECE SINIFLANDIRMA YAPILIR.
-    # NUMERİK PORTFÖY / NAKİT TAHMİNİ YAPILMAZ.
+    # BAŞLIKTAN SADECE SINIFLANDIRMA
     # --------------------------------------------------------
-
-    title_upper = (
-        fund_title or ""
-    ).upper()
+    title_upper = (fund_title or "").upper()
 
     if (
         "PARA PİYASASI" in title_upper
         or "PPF" in title_upper
         or "LİKİT" in title_upper
     ):
-        structural["investment_area"] = (
-            "Para Piyasası"
-        )
-        structural["investment_area_source"] = (
-            "TEFAS başlığı / sınıflandırma"
-        )
-
+        structural["investment_area"] = "Para Piyasası"
+        structural["investment_area_source"] = "TEFAS başlığı / sınıflandırma"
     elif (
         "ALTIN" in title_upper
         or "KIYMETLİ MADEN" in title_upper
         or "GÜMÜŞ" in title_upper
     ):
-        structural["investment_area"] = (
-            "Kıymetli Maden"
-        )
-        structural["investment_area_source"] = (
-            "TEFAS başlığı / sınıflandırma"
-        )
-
-    elif (
-        "BIST 30" in title_upper
-        or "BIST30" in title_upper
-    ):
+        structural["investment_area"] = "Kıymetli Maden"
+        structural["investment_area_source"] = "TEFAS başlığı / sınıflandırma"
+    elif "BIST 30" in title_upper or "BIST30" in title_upper:
         structural["is_bist30"] = True
         structural["is_bist30_known"] = True
-        structural["investment_area"] = (
-            "Hisse Senedi"
-        )
-        structural["investment_area_source"] = (
-            "TEFAS başlığı / sınıflandırma"
-        )
-
+        structural["investment_area"] = "Hisse Senedi"
+        structural["investment_area_source"] = "TEFAS başlığı / sınıflandırma"
     elif "HİSSE SENEDİ" in title_upper:
-        structural["investment_area"] = (
-            "Hisse Senedi"
+        structural["investment_area"] = "Hisse Senedi"
+        structural["investment_area_source"] = "TEFAS başlığı / sınıflandırma"
+
+    # --------------------------------------------------------
+    # 1) TEFAS YENİ RESMİ JSON PORTFÖY DAĞILIMI
+    #
+    # Kritik düzeltme:
+    # Eski V8.0 Fintables HTML'sini ana kaynak kabul ediyordu.
+    # Yeni TEFAS API'si doğrudan 50+ varlık sınıfı yüzdesi döndürüyor.
+    # Aynı tarih/fon tipi snapshot'ı cache'lendiği için 670 fon
+    # için 670 ayrı istek yapılmaz.
+    # --------------------------------------------------------
+    snapshot = fetch_tefas_breakdown_snapshot(
+        fund_kind or "YAT",
+        reference_date,
+    )
+
+    if snapshot.get("ok"):
+        row = snapshot.get("rows", {}).get(code)
+
+        if row:
+            pct_fields = [
+                k for k, v in row.items()
+                if k.endswith("_pct") and v is not None
+            ]
+
+            valid_allocations = [
+                (field, safe_float(row.get(field)))
+                for field in pct_fields
+                if row.get(field) is not None
+                and safe_float(row.get(field)) >= 0
+            ]
+
+            if valid_allocations:
+                top_field, top_value = max(
+                    valid_allocations,
+                    key=lambda x: x[1],
+                )
+
+                structural["top_asset_weight"] = top_value
+                structural["top_asset_weight_basis"] = (
+                    f"TEFAS varlık sınıfı: {top_field}"
+                )
+
+            # TEFAS doğrudan "nakit" isimli tek alan vermiyor.
+            # Likit / nakit-benzeri kalemler açık alanlardan toplanıyor.
+            cash_fields = {
+                "takasbank_money_market_pct",
+                "bist_money_market_pct",
+                "bist_committed_buy_pct",
+                "bist_committed_sell_pct",
+                "repo_pct",
+                "reverse_repo_pct",
+                "term_deposit_pct",
+                "deposit_tl_pct",
+                "deposit_fx_pct",
+                "deposit_gold_pct",
+                "participation_account_pct",
+                "participation_account_tl_pct",
+                "participation_account_fx_pct",
+                "participation_account_gold_pct",
+                "futures_cash_collateral_pct",
+            }
+
+            cash_values = [
+                safe_float(row.get(field))
+                for field in cash_fields
+                if row.get(field) is not None
+            ]
+
+            if cash_values:
+                structural["emergency_cash_ratio"] = clamp(
+                    sum(cash_values),
+                    0.0,
+                    100.0,
+                )
+                structural["cash_ratio_known"] = True
+
+            # TEFAS'tan gerçek yapısal veri geldi.
+            structural["structural_fetch_ok"] = True
+            structural["structural_source"] = "TEFAS Direct Structural API"
+            structural["structural_estimated"] = False
+            structural["structural_date"] = (
+                row.get("date") or snapshot.get("date")
+            )
+
+            # Başlıktan gelen BIST30 bilgisi ayrı tutulur; API'nin
+            # varlık sınıfı dağılımı BIST30'u tek başına doğrulamaz.
+            if (
+                structural["investment_area"] is None
+                and structural["top_asset_weight_basis"]
+            ):
+                basis = structural["top_asset_weight_basis"]
+                if "stock_pct" in basis:
+                    structural["investment_area"] = "Hisse Senedi"
+                    structural["investment_area_source"] = (
+                        "TEFAS portföy dağılımı"
+                    )
+                elif "precious_metals" in basis:
+                    structural["investment_area"] = "Kıymetli Maden"
+                    structural["investment_area_source"] = (
+                        "TEFAS portföy dağılımı"
+                    )
+                elif "foreign_stock" in basis:
+                    structural["investment_area"] = (
+                        "Hisse Senedi (Yabancı)"
+                    )
+                    structural["investment_area_source"] = (
+                        "TEFAS portföy dağılımı"
+                    )
+                elif "government_bond" in basis or "bond" in basis:
+                    structural["investment_area"] = (
+                        "Borçlanma Araçları"
+                    )
+                    structural["investment_area_source"] = (
+                        "TEFAS portföy dağılımı"
+                    )
+
+            # En büyük varlık sınıfı var ama tek tek hisse/menkul
+            # kıymet yoğunlaşması yok. Bu ayrımı açıkça kaydet.
+            structural["structural_error"] = (
+                "TEFAS varlık sınıfı dağılımı bulundu; "
+                "tekil menkul kıymet Top-N yoğunlaşması TEFAS public API'de yok."
+            )
+            return structural
+
+        structural["structural_error"] = (
+            f"TEFAS snapshot bulundu fakat {code} fonu "
+            "için portföy satırı bulunamadı."
         )
-        structural["investment_area_source"] = (
-            "TEFAS başlığı / sınıflandırma"
+    else:
+        structural["structural_error"] = (
+            snapshot.get("error")
+            or "TEFAS yapısal veri alınamadı."
         )
 
     # --------------------------------------------------------
-    # FINTABLES
+    # 2) FINTABLES FALLBACK
+    #
+    # TEFAS Direct başarısız olursa eski kaynak denenebilir.
+    # Ancak başlıktan sayısal değer ÜRETİLMEZ.
     # --------------------------------------------------------
-
     fintables_url = (
-        f"https://fintables.com/fonlar/"
-        f"{code.lower()}"
+        f"https://fintables.com/fonlar/{code.lower()}"
     )
 
     response, status = request_with_status(
@@ -1311,221 +1611,78 @@ def fetch_fund_structural_data(
                 "text/html,application/xhtml+xml;"
                 "q=0.9,*/*;q=0.8"
             ),
-            "Accept-Language": (
-                "tr-TR,tr;q=0.9,en;q=0.7"
-            ),
+            "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.7",
         },
     )
 
-    if response is None or not status.ok:
-        structural["structural_error"] = (
-            f"{status.error_type}: "
-            f"{status.message}"
-        )
-        return structural
+    if response is not None and status.ok:
+        text = response.text
+        text_lower = text.lower()
 
-    text = response.text
-
-    # WAF / challenge sayfası geldiyse veri varmış
-    # gibi kabul etmiyoruz.
-    challenge_markers = (
-        "captcha",
-        "cf-chl-",
-        "challenge-platform",
-        "verify you are human",
-        "just a moment",
-        "access denied",
-    )
-
-    text_lower = text.lower()
-
-    if any(
-        marker in text_lower
-        for marker in challenge_markers
-    ):
-        structural["structural_error"] = (
-            "ANTI_BOT_OR_CHALLENGE_PAGE"
-        )
-        return structural
-
-    parsed_any = False
-
-    # En büyük varlık
-    match_top = re.search(
-        r'En Büyük Pay["\s:]+'
-        r'([0-9]+(?:[.,][0-9]+)?)',
-        text,
-        re.IGNORECASE,
-    )
-
-    if match_top:
-        value = parse_number(
-            match_top.group(1)
+        challenge_markers = (
+            "captcha",
+            "cf-chl-",
+            "challenge-platform",
+            "verify you are human",
+            "just a moment",
+            "access denied",
         )
 
-        if value is not None:
-            structural["top_asset_weight"] = value
-            parsed_any = True
-
-    # BIST 30
-    if re.search(
-        r"BIST\s*30",
-        text,
-        re.IGNORECASE,
-    ):
-        structural["is_bist30"] = True
-        structural["is_bist30_known"] = True
-        parsed_any = True
-
-    # Nakit / ters repo
-    match_cash = re.search(
-        r'(?:Nakit|Ters Repo|PPF)'
-        r'["\s:]+'
-        r'([0-9]+(?:[.,][0-9]+)?)',
-        text,
-        re.IGNORECASE,
-    )
-
-    if match_cash:
-        cash_val = parse_number(
-            match_cash.group(1)
-        )
-
-        if cash_val is not None:
-            structural[
-                "emergency_cash_ratio"
-            ] = cash_val
-
-            structural[
-                "cash_ratio_known"
-            ] = True
-
-            parsed_any = True
-
-    # Fon başlığı
-    match_title = re.search(
-        r'<h1[^>]*>([^<]{5,150})</h1>'
-        r'|<title>([^<]{5,150}?)\s*[-|–|·|]',
-        text,
-        re.IGNORECASE | re.DOTALL,
-    )
-
-    if match_title:
-        raw = (
-            match_title.group(1)
-            or match_title.group(2)
-            or ""
-        ).strip()
-
-        raw = re.sub(
-            r"\s+",
-            " ",
-            raw,
-        )
-
-        if (
-            raw
-            and not structural.get("fund_title")
+        if not any(
+            marker in text_lower
+            for marker in challenge_markers
         ):
-            structural["fund_title"] = raw[:120]
+            # Yalnızca açıkça etiketlenmiş gerçek sayısal alanları kabul et.
+            match_top = re.search(
+                r'En Büyük Pay["\s:]+'
+                r'([0-9]+(?:[.,][0-9]+)?)',
+                text,
+                re.IGNORECASE,
+            )
+            if match_top:
+                value = parse_number(match_top.group(1))
+                if value is not None:
+                    structural["top_asset_weight"] = value
+                    structural["top_asset_weight_basis"] = (
+                        "Fintables açık alanı"
+                    )
 
-            parsed_any = True
+            match_cash = re.search(
+                r'(?:Nakit|Ters Repo|PPF)["\s:]+'
+                r'([0-9]+(?:[.,][0-9]+)?)',
+                text,
+                re.IGNORECASE,
+            )
+            if match_cash:
+                cash_val = parse_number(match_cash.group(1))
+                if cash_val is not None:
+                    structural["emergency_cash_ratio"] = cash_val
+                    structural["cash_ratio_known"] = True
 
-    # Yatırım alanı
-    area_patterns = [
-        (
-            r"Yabanc[ıi]\s*Teknoloji"
-            r"|Teknoloji\s*Sekt[oö]r"
-            r"|Yeni\s*Teknoloj",
-            "Hisse Senedi (Yabancı Teknoloji)",
-        ),
-        (
-            r"Yabanc[ıi]\s*Hisse",
-            "Hisse Senedi (Yabancı)",
-        ),
-        (
-            r"Bor[cç]lanma\s*Ara[cç]"
-            r"|Tahvil|Bono",
-            "Borçlanma Araçları",
-        ),
-        (
-            r"Para\s*Piyasas",
-            "Para Piyasası",
-        ),
-        (
-            r"De[gğ]i[sş]ken\s*Fon"
-            r"|Karma\s*Fon"
-            r"|De[gğ]i[sş]ken",
-            "Karma / Değişken",
-        ),
-        (
-            r"Alt[ıi]n\s*Kat[ıi]l[ıi]m"
-            r"|Kat[ıi]l[ıi]m.*Alt[ıi]n",
-            "Kıymetli Maden (Altın Katılım)",
-        ),
-        (
-            r"K[ıi]ymetli\s*Maden"
-            r"|Alt[ıi]n\s*Fon"
-            r"|G[uü]m[uü][sş]",
-            "Kıymetli Maden",
-        ),
-        (
-            r"Kat[ıi]l[ıi]m\s*Fon"
-            r"|Faizsiz",
-            "Katılım",
-        ),
-        (
-            r"Fon\s*Sepeti",
-            "Fon Sepeti",
-        ),
-        (
-            r"Serbest\s*Fon|Serbest",
-            "Serbest",
-        ),
-        (
-            r"Koruma\s*Ama[cç]l[ıi]"
-            r"|Anapara\s*Koruma",
-            "Koruma Amaçlı",
-        ),
-        (
-            r"BYF|ETF|Borsa\s*Yat[ıi]r[ıi]m",
-            "BYF / ETF",
-        ),
-        (
-            r"Emeklilik",
-            "Emeklilik",
-        ),
-    ]
+            if structural["top_asset_weight"] is not None or (
+                structural["cash_ratio_known"]
+            ):
+                structural["structural_fetch_ok"] = True
+                structural["structural_source"] = "Fintables"
+                structural["structural_estimated"] = False
+                structural["structural_error"] = (
+                    "TEFAS Direct API kullanılamadı; "
+                    "Fintables gerçek açık alanı kullanıldı."
+                )
+                return structural
 
-    for pattern, label in area_patterns:
-        if re.search(
-            pattern,
-            text,
-            re.IGNORECASE,
-        ):
-            structural[
-                "investment_area"
-            ] = label
-            structural[
-                "investment_area_source"
-            ] = "Fintables"
-            parsed_any = True
-            break
+    # Hiçbir kaynak gerçek sayısal yapısal veri vermediyse:
+    # değerler None kalır; BAŞLIKTAN SAYISAL TAHMİN YAPILMAZ.
+    structural["structural_fetch_ok"] = False
+    structural["structural_source"] = "YOK"
+    structural["structural_estimated"] = False
 
-    if parsed_any:
-        structural[
-            "structural_fetch_ok"
-        ] = True
-        structural[
-            "structural_source"
-        ] = "Fintables"
-    else:
-        structural[
-            "structural_error"
-        ] = "PARSE_NO_SUPPORTED_FIELDS"
+    if not structural["structural_error"]:
+        structural["structural_error"] = (
+            "TEFAS Direct ve Fintables yapısal veri sağlamadı."
+        )
 
     return structural
-
 
 # ============================================================
 # FON SERİSİ
@@ -1785,10 +1942,17 @@ def compute_fund_metrics(
         recent_weekly_returns
     )
 
+    reference_date = (
+        df["date"].iloc[-1].strftime("%Y-%m-%d")
+        if not df.empty
+        else None
+    )
+
     structural = fetch_fund_structural_data(
         fund_code,
         fund_kind,
         fund_title,
+        reference_date,
     )
 
     return {
