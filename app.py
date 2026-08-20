@@ -4594,7 +4594,7 @@ for item in all_funds_for_output:
         "Yapısal Hata":
             item.get(
                 "structural_error",
-                "",
+                "","
             ),
     })
 
