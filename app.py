@@ -4922,7 +4922,7 @@ st.download_button(
     label="📥 Güncellenmiş Hibrit Excel'i İndir",
     data=output,
     file_name=(
-        "fonlar_KGDM3_KAZRISK_V8_0.xlsx"
+        "fonlar_KGDM3_KAZRISK_V8_1.xlsx"
     ),
     mime=(
         "application/vnd.openxmlformats-"
