@@ -19,6 +19,15 @@ from openpyxl.utils import get_column_letter
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from openpyxl.styles.fills import PatternFill
+
+# openpyxl 'extLst' hatasını çözmek için yama (Monkey Patch)
+original_init = PatternFill.__init__
+def new_init(self, *args, **kwargs):
+    if 'extLst' in kwargs:
+        del kwargs['extLst']
+    original_init(self, *args, **kwargs)
+PatternFill.__init__ = new_init
 
 # ============================================================
 # KGDM-3 & KAZRİSK - GELİŞTİRİLMİŞ SÜRÜM
