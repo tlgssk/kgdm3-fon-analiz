@@ -45,7 +45,7 @@ st.set_page_config(
 st.title("📊 KGDM-3 & KAZRİSK Hibrit Fon Analizi")
 st.caption(
     "TEFAS + TEFAS Direct API + İş Yatırım + Fintables | "
-    "Kaynak Tanılama + Momentum + Risk + Likidite | V8.0"
+    "Kaynak Tanılama + Momentum + Risk + Likidite | V8.1"
 )
 
 
@@ -71,7 +71,7 @@ MIN_REFERENCE_SAMPLE = 5
 OVERHEAT_Z_THRESHOLD = 2.0
 OVERHEAT_PENALTY = 6.0
 
-APP_VERSION = "8.0.0"
+APP_VERSION = "8.1.0"
 
 GITHUB_OWNER = "tlgssk"
 GITHUB_REPO = "kgdm3-fon-analiz"
@@ -2853,6 +2853,81 @@ def calculate_trend_scores(
 # KARAR
 # ============================================================
 
+def decision_label_from_score(score) -> str:
+    """Karar skorunu mevcut model eşiklerine göre etikete çevirir."""
+    if score is None:
+        return "YETERSİZ VERİ"
+
+    score = safe_float(score)
+
+    if score >= STRONG_BUY:
+        return "GÜÇLÜ AL"
+    elif score >= WATCH_LIST:
+        return "ASIL LİSTE"
+    elif score >= CORRECTION:
+        return "DÜZELTME / İZLE"
+    else:
+        return "ACİL SAT"
+
+
+def calculate_rolling_decisions(
+    funds: List[dict],
+) -> None:
+    """
+    Günlük karar skorunu ve son 2/3 işlem gününün ortalama karar skorlarını
+    hesaplar.
+
+    Buradaki günlük skor, mevcut modelin günlük/rolling 5-günlük momentum
+    hesabından üretilen running_trend_hybrid değeridir. Böylece ana
+    'Karar Skoru' formülü değiştirilmez; sadece erken uyarı için kısa vadeli
+    karar görünümü eklenir.
+    """
+    for fund in funds:
+        running_scores = [
+            safe_float(x)
+            for x in (fund.get("running_trend_hybrid") or [])
+            if x is not None
+        ]
+
+        if not running_scores:
+            fund["daily_decision_score"] = None
+            fund["daily_model_decision"] = "YETERSİZ VERİ"
+            fund["decision_score_2d"] = None
+            fund["model_decision_2d"] = "YETERSİZ VERİ"
+            fund["decision_score_3d"] = None
+            fund["model_decision_3d"] = "YETERSİZ VERİ"
+            continue
+
+        # En son geçerli işlem günü.
+        daily_score = running_scores[-1]
+        fund["daily_decision_score"] = int(round(daily_score))
+        fund["daily_model_decision"] = decision_label_from_score(
+            daily_score
+        )
+
+        # Son 2 işlem günü.
+        if len(running_scores) >= 2:
+            score_2d = sum(running_scores[-2:]) / 2.0
+            fund["decision_score_2d"] = int(round(score_2d))
+            fund["model_decision_2d"] = decision_label_from_score(
+                score_2d
+            )
+        else:
+            fund["decision_score_2d"] = None
+            fund["model_decision_2d"] = "YETERSİZ VERİ"
+
+        # Son 3 işlem günü.
+        if len(running_scores) >= 3:
+            score_3d = sum(running_scores[-3:]) / 3.0
+            fund["decision_score_3d"] = int(round(score_3d))
+            fund["model_decision_3d"] = decision_label_from_score(
+                score_3d
+            )
+        else:
+            fund["decision_score_3d"] = None
+            fund["model_decision_3d"] = "YETERSİZ VERİ"
+
+
 def finalize_decisions(
     funds: List[dict],
 ) -> None:
@@ -2894,16 +2969,7 @@ def finalize_decisions(
             "decision_score"
         ]
 
-        if score >= STRONG_BUY:
-            fund["karar"] = "GÜÇLÜ AL"
-        elif score >= WATCH_LIST:
-            fund["karar"] = "ASIL LİSTE"
-        elif score >= CORRECTION:
-            fund["karar"] = (
-                "DÜZELTME / İZLE"
-            )
-        else:
-            fund["karar"] = "ACİL SAT"
+        fund["karar"] = decision_label_from_score(score)
 
 
 # ============================================================
@@ -3113,6 +3179,12 @@ def create_excel_output(
         "Fon Kodu",
         "Fon Adı",
         "Yatırım Alanı",
+        "Günlük Karar Skoru",
+        "Günlük Model Kararı",
+        "2 Günlük Karar Skoru",
+        "2 Günlük Model Kararı",
+        "3 Günlük Karar Skoru",
+        "3 Günlük Model Kararı",
         "Valör",
         "Karar Skoru (Piyasa-Bağıl)",
         "Trend Skoru (Liste-Bağıl)",
@@ -3248,6 +3320,21 @@ def create_excel_output(
             item.get(
                 "investment_area"
             ) or "-",
+            item.get("daily_decision_score"),
+            item.get(
+                "daily_model_decision",
+                "YETERSİZ VERİ",
+            ),
+            item.get("decision_score_2d"),
+            item.get(
+                "model_decision_2d",
+                "YETERSİZ VERİ",
+            ),
+            item.get("decision_score_3d"),
+            item.get(
+                "model_decision_3d",
+                "YETERSİZ VERİ",
+            ),
             item.get("valor", 0),
             item.get(
                 "decision_score"
@@ -3523,8 +3610,11 @@ def create_excel_output(
         color=COLOR_YELLOW,
     )
 
-    decision_col = header_index[
-        "Model Kararı"
+    decision_columns = [
+        "Günlük Model Kararı",
+        "2 Günlük Model Kararı",
+        "3 Günlük Model Kararı",
+        "Model Kararı",
     ]
 
     for row_number in range(
@@ -3532,92 +3622,111 @@ def create_excel_output(
         ws_scores.max_row + 1,
     ):
 
-        decision_cell = (
-            ws_scores.cell(
-                row=row_number,
-                column=decision_col,
+        for decision_name in decision_columns:
+            decision_col = header_index.get(
+                decision_name
             )
+
+            if not decision_col:
+                continue
+
+            decision_cell = (
+                ws_scores.cell(
+                    row=row_number,
+                    column=decision_col,
+                )
+            )
+
+            decision_text = str(
+                decision_cell.value or ""
+            )
+
+            if (
+                "GÜÇLÜ AL"
+                in decision_text
+                or "ASIL LİSTE"
+                in decision_text
+            ):
+                decision_cell.font = (
+                    green_font
+                )
+
+            elif (
+                "DÜZELTME"
+                in decision_text
+            ):
+                decision_cell.font = (
+                    yellow_font
+                )
+
+            elif (
+                "ACİL SAT"
+                in decision_text
+            ):
+                decision_cell.font = (
+                    red_font
+                )
+
+    score_columns = [
+        "Günlük Karar Skoru",
+        "2 Günlük Karar Skoru",
+        "3 Günlük Karar Skoru",
+        "Karar Skoru (Piyasa-Bağıl)",
+    ]
+
+    for score_name in score_columns:
+        score_col = header_index.get(
+            score_name
         )
 
-        decision_text = str(
-            decision_cell.value or ""
+        if not score_col:
+            continue
+
+        score_col_letter = get_column_letter(
+            score_col
         )
 
-        if (
-            "GÜÇLÜ AL"
-            in decision_text
-            or "ASIL LİSTE"
-            in decision_text
-        ):
-            decision_cell.font = (
-                green_font
-            )
-
-        elif (
-            "DÜZELTME"
-            in decision_text
-        ):
-            decision_cell.font = (
-                yellow_font
-            )
-
-        elif (
-            "ACİL SAT"
-            in decision_text
-        ):
-            decision_cell.font = (
-                red_font
-            )
-
-    hybrid_col_letter = (
-        get_column_letter(
-            header_index[
-                "Karar Skoru (Piyasa-Bağıl)"
-            ]
+        score_range = (
+            f"{score_col_letter}2:"
+            f"{score_col_letter}"
+            f"{ws_scores.max_row}"
         )
-    )
 
-    score_range = (
-        f"{hybrid_col_letter}2:"
-        f"{hybrid_col_letter}"
-        f"{ws_scores.max_row}"
-    )
-
-    ws_scores.conditional_formatting.add(
-        score_range,
-        CellIsRule(
-            operator="greaterThanOrEqual",
-            formula=["75"],
-            fill=PatternFill(
-                start_color=COLOR_LIGHT_GREEN,
-                fill_type="solid",
+        ws_scores.conditional_formatting.add(
+            score_range,
+            CellIsRule(
+                operator="greaterThanOrEqual",
+                formula=["75"],
+                fill=PatternFill(
+                    start_color=COLOR_LIGHT_GREEN,
+                    fill_type="solid",
+                ),
             ),
-        ),
-    )
+        )
 
-    ws_scores.conditional_formatting.add(
-        score_range,
-        CellIsRule(
-            operator="between",
-            formula=["50", "74"],
-            fill=PatternFill(
-                start_color=COLOR_LIGHT_YELLOW,
-                fill_type="solid",
+        ws_scores.conditional_formatting.add(
+            score_range,
+            CellIsRule(
+                operator="between",
+                formula=["50", "74"],
+                fill=PatternFill(
+                    start_color=COLOR_LIGHT_YELLOW,
+                    fill_type="solid",
+                ),
             ),
-        ),
-    )
+        )
 
-    ws_scores.conditional_formatting.add(
-        score_range,
-        CellIsRule(
-            operator="lessThan",
-            formula=["50"],
-            fill=PatternFill(
-                start_color=COLOR_LIGHT_RED,
-                fill_type="solid",
+        ws_scores.conditional_formatting.add(
+            score_range,
+            CellIsRule(
+                operator="lessThan",
+                formula=["50"],
+                fill=PatternFill(
+                    start_color=COLOR_LIGHT_RED,
+                    fill_type="solid",
+                ),
             ),
-        ),
-    )
+        )
 
     currency_col = header_index.get(
         "AUM (₺)"
@@ -4153,6 +4262,13 @@ for f in insufficient_funds:
         "last_5_scores_str"
     ] = "-"
 
+    f["daily_decision_score"] = None
+    f["daily_model_decision"] = "YETERSİZ VERİ"
+    f["decision_score_2d"] = None
+    f["model_decision_2d"] = "YETERSİZ VERİ"
+    f["decision_score_3d"] = None
+    f["model_decision_3d"] = "YETERSİZ VERİ"
+
     f[
         "reference_scope"
     ] = "-"
@@ -4239,6 +4355,12 @@ with st.spinner(
         eligible_funds
     )
 
+    # Kısa vadeli erken uyarı kararları:
+    # Günlük + son 2 işlem günü + son 3 işlem günü.
+    calculate_rolling_decisions(
+        eligible_funds
+    )
+
 
 all_funds_for_output = (
     eligible_funds
@@ -4301,6 +4423,45 @@ for item in all_funds_for_output:
             item.get(
                 "investment_area"
             ) or "-",
+
+        "Günlük Karar Skoru":
+            item.get(
+                "daily_decision_score"
+            ),
+
+        "Günlük Model Kararı":
+            item.get(
+                "daily_model_decision",
+                "YETERSİZ VERİ",
+            ),
+
+        "2 Günlük Karar Skoru":
+            item.get(
+                "decision_score_2d"
+            ),
+
+        "2 Günlük Model Kararı":
+            item.get(
+                "model_decision_2d",
+                "YETERSİZ VERİ",
+            ),
+
+        "3 Günlük Karar Skoru":
+            item.get(
+                "decision_score_3d"
+            ),
+
+        "3 Günlük Model Kararı":
+            item.get(
+                "model_decision_3d",
+                "YETERSİZ VERİ",
+            ),
+
+        "Valör":
+            item.get(
+                "valor",
+                0,
+            ),
 
         "Karar Skoru":
             item.get(
@@ -4503,10 +4664,13 @@ st.subheader(
 )
 
 st.caption(
-    "**Karar Skoru** piyasa-bağıl; "
-    "**Trend Skoru** liste-bağıl günlük "
-    "seyirdir. AUM Akış Proxy gerçek "
-    "net para girişi/çıkışı değildir."
+    "**Karar Skoru** piyasa-bağıl ana skordur. "
+    "**Günlük / 2 Günlük / 3 Günlük Karar Skoru** "
+    "mevcut günlük rolling hibrit skorların sırasıyla "
+    "son 1, 2 ve 3 işlem günündeki değerlerinden hesaplanır. "
+    "Bu alanlar özellikle kısa vadeli **ACİL SAT** sinyalini "
+    "erken fark etmek için eklenmiştir. "
+    "AUM Akış Proxy gerçek net para girişi/çıkışı değildir."
 )
 
 st.dataframe(
@@ -4514,6 +4678,54 @@ st.dataframe(
     use_container_width=True,
     hide_index=True,
 )
+
+
+# ============================================================
+# KISA VADELİ ACİL SAT UYARISI
+# ============================================================
+
+early_sell_alerts = []
+
+for item in all_funds_for_output:
+    alerts = []
+
+    if item.get("daily_model_decision") == "ACİL SAT":
+        alerts.append("Günlük")
+
+    if item.get("model_decision_2d") == "ACİL SAT":
+        alerts.append("2 Günlük")
+
+    if item.get("model_decision_3d") == "ACİL SAT":
+        alerts.append("3 Günlük")
+
+    if alerts:
+        early_sell_alerts.append({
+            "Fon Kodu": item.get("code"),
+            "Fon Adı": item.get("fund_title") or "-",
+            "Yatırım Alanı": item.get("investment_area") or "-",
+            "Uyarı": " + ".join(alerts),
+            "Günlük Skor": item.get("daily_decision_score"),
+            "2 Günlük Skor": item.get("decision_score_2d"),
+            "3 Günlük Skor": item.get("decision_score_3d"),
+            "Ana Karar Skoru": item.get("decision_score"),
+            "Ana Model Kararı": item.get("karar"),
+        })
+
+if early_sell_alerts:
+    st.error(
+        f"🚨 {len(early_sell_alerts)} fon için kısa vadeli "
+        '"ACİL SAT" uyarısı oluştu.'
+    )
+    st.dataframe(
+        pd.DataFrame(early_sell_alerts),
+        use_container_width=True,
+        hide_index=True,
+    )
+else:
+    st.success(
+        '✅ Günlük, 2 günlük ve 3 günlük kısa vadeli '
+        '"ACİL SAT" uyarısı oluşmadı.'
+    )
 
 
 # ============================================================
