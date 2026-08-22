@@ -30,19 +30,9 @@ def new_init(self, *args, **kwargs):
         del kwargs['extLst']
     original_init(self, *args, **kwargs)
 PatternFill.__init__ = new_init
-# ============================================================
-
-# Google GenAI SDK (Opsiyonel)
-try:
-    from google import genai
-    from google.genai import types
-    GENAI_AVAILABLE = True
-except ImportError:
-    GENAI_AVAILABLE = False
-
 
 # ============================================================
-# KGDM-3 & KAZRİSK - SÜRÜM V10.3 (API FIX YAMASI)
+# KGDM-3 & KAZRİSK - SÜRÜM V10.4 (REST API %100 FIX)
 # ============================================================
 
 st.set_page_config(
@@ -54,7 +44,7 @@ st.set_page_config(
 st.title("📊 KGDM-3 & KAZRİSK Hibrit Fon Analizi")
 st.caption(
     "TEFAS + TEFAS Direct API + İş Yatırım + Fintables | "
-    "Gemini Canlı Sentiment + Evrensel Baseline + Kalite Denetimi | V10.3"
+    "Gemini Canlı Sentiment (REST API) + Evrensel Baseline | V10.4"
 )
 
 # ============================================================
@@ -78,7 +68,7 @@ MIN_REFERENCE_SAMPLE = 5
 OVERHEAT_Z_THRESHOLD = 2.0
 OVERHEAT_PENALTY = 6.0
 
-APP_VERSION = "10.3.0"
+APP_VERSION = "10.4.0"
 
 GITHUB_OWNER = "tlgssk"
 GITHUB_REPO = "kgdm3-fon-analiz"
@@ -94,7 +84,6 @@ DEFAULT_HYBRID_SECURITY_WEIGHT = 0.35
 DEFAULT_HYBRID_SENTIMENT_WEIGHT = 0.15
 
 Z_LIMIT = 2.5
-
 STRONG_BUY = 75
 WATCH_LIST = 50
 CORRECTION = 35
@@ -106,7 +95,6 @@ BIST30_BONUS = 5.0
 HIGH_LIQUIDITY_BONUS = 5.0
 LOW_LIQUIDITY_PENALTY = 3.0
 POSITIVE_INVESTOR_FLOW_BONUS = 3.0
-
 EMA_DECAY = 0.65
 
 # ============================================================
@@ -136,7 +124,7 @@ ENABLE_FILTERS = st.sidebar.checkbox("Filtreleri Etkinleştir", value=False)
 TARGET_WEEKLY_RETURN = st.sidebar.slider("Hedef Haftalık Getiri (%)", -5.0, 10.0, 0.0, 0.10)
 MIN_INVESTOR_COUNT = st.sidebar.slider("Minimum Yatırımcı Sayısı", 0, 100000, 0, 500)
 
-with st.sidebar.expander("⚖️ Skor Ağırlıkları (V10.3)"):
+with st.sidebar.expander("⚖️ Skor Ağırlıkları (V10.4)"):
     w_return = st.slider("Getiri ağırlığı", 0.0, 1.0, DEFAULT_MOMENTUM_WEIGHTS["return"], 0.05)
     w_sharpe = st.slider("Sharpe ağırlığı", 0.0, 1.0, DEFAULT_MOMENTUM_WEIGHTS["sharpe"], 0.05)
     w_cumulative = st.slider("Kümülatif ağırlığı", 0.0, 1.0, DEFAULT_MOMENTUM_WEIGHTS["cumulative"], 0.05)
@@ -167,33 +155,26 @@ SHOW_DIAGNOSTICS = st.sidebar.checkbox("Kaynak tanılama bilgisini göster", val
 
 
 # ============================================================
-# CANLI GEMINI DUYARLILIK (MARKET SENTIMENT) MOTORU - V10.3 API FIX
+# CANLI GEMINI DUYARLILIK (MARKET SENTIMENT) MOTORU - V10.4 REST API
 # ============================================================
 
 @st.cache_data(ttl=60 * 60 * 4, show_spinner=False)
 def fetch_market_sentiment(investment_area: str, api_key: str) -> dict:
     area = str(investment_area).strip()
 
-    error_reason = ""
     if not api_key:
-        error_reason = "API Anahtarı Girilmedi"
-    elif not GENAI_AVAILABLE:
-        error_reason = "google-genai Kütüphanesi Bulunamadı"
-
-    if error_reason:
         area_upper = area.upper()
         if "YABANCI TEKNOLOJİ" in area_upper or "YABANCI" in area_upper:
-            return {"score": 38, "label": "Negatif (Kâr Satışı)", "ai_active": False, "ai_reason": error_reason}
+            return {"score": 38, "label": "Negatif (Kâr Satışı)", "ai_active": False, "ai_reason": "API Anahtarı Girilmedi"}
         elif "ALTIN" in area_upper or "GÜMÜŞ" in area_upper or "KIYMETLİ" in area_upper:
-            return {"score": 82, "label": "Güçlü Pozitif (Faiz İndirimi)", "ai_active": False, "ai_reason": error_reason}
+            return {"score": 82, "label": "Güçlü Pozitif (Faiz İndirimi)", "ai_active": False, "ai_reason": "API Anahtarı Girilmedi"}
         elif "PARA PİYASASI" in area_upper or "BORÇLANMA" in area_upper:
-            return {"score": 65, "label": "Pozitif (Sabit Getiri)", "ai_active": False, "ai_reason": error_reason}
+            return {"score": 65, "label": "Pozitif (Sabit Getiri)", "ai_active": False, "ai_reason": "API Anahtarı Girilmedi"}
         elif "HİSSE" in area_upper or "BIST" in area_upper:
-            return {"score": 54, "label": "Dengeli / Pozitif Beklenti", "ai_active": False, "ai_reason": error_reason}
-        return {"score": 50, "label": "Nötr / Kural Tabanlı", "ai_active": False, "ai_reason": error_reason}
+            return {"score": 54, "label": "Dengeli / Pozitif Beklenti", "ai_active": False, "ai_reason": "API Anahtarı Girilmedi"}
+        return {"score": 50, "label": "Nötr / Kural Tabanlı", "ai_active": False, "ai_reason": "API Anahtarı Girilmedi"}
 
     try:
-        client = genai.Client(api_key=api_key)
         prompt = f"""
 Sen kıdemli bir fon yöneticisi ve makroekonomik duyarlılık analistisin.
 Türkiye TEFAS fon piyasasında yer alan şu yatırım alanı için güncel piyasa, haber ve ekonomist beklentilerini değerlendir:
@@ -210,27 +191,39 @@ GÖREV:
 Sadece ve sadece aşağıdaki JSON şemasında çıktı ver, format dışında hiçbir kelime yazma:
 {{"score": 75, "label": "Gerekçe etiketi"}}
 """
-        # Hata Fix: Stabil model (1.5-flash) seçildi ve JSON kısıtlaması esnetildi.
-        response = client.models.generate_content(
-            model='gemini-1.5-flash',
-            contents=prompt,
-            config=types.GenerateContentConfig(temperature=0.2)
-        )
         
-        # Gelen yanıtı güvenli bir şekilde temizleyip JSON'a çeviriyoruz
-        raw_text = response.text.strip()
-        if raw_text.startswith("```json"):
-            raw_text = raw_text[7:]
-        elif raw_text.startswith("```"):
-            raw_text = raw_text[3:]
-        if raw_text.endswith("```"):
-            raw_text = raw_text[:-3]
+        # REST API DOĞRUDAN İSTEK (KÜTÜPHANESİZ %100 GARANTİLİ)
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+        headers = {'Content-Type': 'application/json'}
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"temperature": 0.2}
+        }
+        
+        response = requests.post(url, headers=headers, json=payload, timeout=15)
+        
+        if response.status_code != 200:
+            return {
+                "score": 50, 
+                "label": "Nötr", 
+                "ai_active": False, 
+                "ai_reason": f"API HTTP Hatası: {response.status_code} ({response.text[:30]})"
+            }
             
-        data = json.loads(raw_text.strip())
+        data = response.json()
+        raw_text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "{}")
+        
+        # JSON'ı Güvenli Temizleme
+        raw_text = raw_text.strip()
+        if raw_text.startswith("```json"): raw_text = raw_text[7:]
+        elif raw_text.startswith("```"): raw_text = raw_text[3:]
+        if raw_text.endswith("```"): raw_text = raw_text[:-3]
+            
+        parsed_data = json.loads(raw_text.strip())
         
         return {
-            "score": int(clamp(safe_float(data.get("score", 50)), 0.0, 100.0)),
-            "label": str(data.get("label", "Nötr")),
+            "score": int(clamp(safe_float(parsed_data.get("score", 50)), 0.0, 100.0)),
+            "label": str(parsed_data.get("label", "Nötr")),
             "ai_active": True,
             "ai_reason": "Bağlantı Başarılı"
         }
@@ -239,7 +232,7 @@ Sadece ve sadece aşağıdaki JSON şemasında çıktı ver, format dışında h
             "score": 50, 
             "label": "Nötr", 
             "ai_active": False, 
-            "ai_reason": f"API Hatası: {str(exc)[:40]}"
+            "ai_reason": f"Kod Hatası: {str(exc)[:40]}"
         }
 
 # ============================================================
@@ -379,7 +372,7 @@ def build_http_session() -> requests.Session:
     adapter = HTTPAdapter(max_retries=retry, pool_connections=MAX_WORKERS, pool_maxsize=MAX_WORKERS)
     session.mount("https://", adapter)
     session.mount("http://", adapter)
-    session.headers.update({"User-Agent": "KGDM3-Fon-Analiz/10.3", "Accept": "application/json,text/html"})
+    session.headers.update({"User-Agent": "KGDM3-Fon-Analiz/10.4", "Accept": "application/json,text/html"})
     return session
 
 HTTP = build_http_session()
@@ -772,9 +765,8 @@ def calculate_confidence_score(fund: dict) -> int:
     if fund.get("aum") is not None and safe_float(fund.get("aum")) > 0: score += 5
     return int(round(clamp(score, 0, 100)))
 
-
 # ============================================================
-# EXCEL ÇIKTISI (D SÜTUNU BUGÜN TARİHLİ & DİNAMİK RENKLENDİRME)
+# EXCEL ÇIKTISI
 # ============================================================
 
 def create_excel_output(wb, ws_list, all_funds, common_n_days):
@@ -893,7 +885,6 @@ def create_excel_output(wb, ws_list, all_funds, common_n_days):
     output.seek(0)
     return output
 
-
 # ============================================================
 # ANA ARAYÜZ (STREAMLIT)
 # ============================================================
@@ -957,7 +948,7 @@ output = create_excel_output(wb, ws_list, eligible, common_n)
 # SKOR ÖZETLERİ VE EKRAN TABLOSU
 # ============================================================
 
-st.subheader("📈 KAZRİSK Portföy Özeti (V10.3)")
+st.subheader("📈 KAZRİSK Portföy Özeti (V10.4)")
 col1, col2, col3, col4 = st.columns(4)
 scores = [safe_float(x.get("decision_score")) for x in eligible if x.get("decision_score") is not None]
 if scores:
@@ -1031,7 +1022,7 @@ try:
 except AttributeError:
     styled_df = df_display.style.applymap(color_cells)
 
-st.subheader("📊 Analiz Sonuçları (V10.3)")
+st.subheader("📊 Analiz Sonuçları (V10.4)")
 st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
 # ============================================================
@@ -1058,11 +1049,11 @@ if sell_alerts or buy_alerts:
         else:
             st.success("Şu an teyitli 'Güçlü Al' fırsatı veren fon yok.")
 
-st.success(f"✅ V10.3 Analiz tamamlandı. Toplam {len(eligible)} fon işlendi.")
+st.success(f"✅ V10.4 Analiz tamamlandı. Toplam {len(eligible)} fon işlendi.")
 st.download_button(
-    label="📥 KAZRİSK V10.3 Excel İndir",
+    label="📥 KAZRİSK V10.4 Excel İndir",
     data=output,
-    file_name="fonlar_KGDM3_KAZRISK_FINAL_V10_3.xlsx",
+    file_name="fonlar_KGDM3_KAZRISK_FINAL_V10_4.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
 
@@ -1074,7 +1065,6 @@ if SHOW_DIAGNOSTICS:
     diagnostic_rows = []
     for item in eligible:
         
-        # EĞER PASİFSE SEBEBİNİ YANINA YAZDIR:
         reason = item.get("sentiment_ai_reason", "Bilinmiyor")
         if item.get("sentiment_ai_active"):
             ai_status = "🟢 Aktif (Canlı API)"
