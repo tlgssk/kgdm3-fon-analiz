@@ -20,14 +20,14 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 # ============================================================
-# KGDM-3 & KAZRİSK - SÜRÜM V9.1 (NİHAİ)
+# KGDM-3 & KAZRİSK - SÜRÜM V9.1 (EVRENSEL Z-SCORE DÜZELTMESİ)
 # ============================================================
 # - V8.3'ün istikrarlı kaynak izleme ve TEFAS yapısı korundu.
 # - V9.0'ın "Veri Kalitesi + Matematiksel Tutarlılık Denetimi" eklendi.
 # - Sütunlardaki tarihler D Sütununda BUGÜN Karar Skoru olacak şekilde 
 #   Yeniden-Eskiye (Bugün -> Dün -> Önceki Gün) doğru sıralandı.
 # - Web Arayüzünde SATIŞ (🚨) ve ALIM (🚀) alarmları yan yana ayrıldı.
-# - Excel formatlarındaki % hataları ve dinamik renkler düzeltildi.
+# - Puanların listeye göre sapmasını engelleyen Evrensel Z-Score aktif edildi.
 # ============================================================
 
 st.set_page_config(
@@ -301,8 +301,18 @@ def build_fund_meta_map(universe: pd.DataFrame):
     return meta
 
 def build_universe_reference(universe: pd.DataFrame, window: int):
-    ref = {k: {"mean_return": [], "sharpe": [], "cumulative": [], "max_dd_inv": []} for k in FUND_KINDS}
+    # AUM ve Investors listeleri eklendi
+    ref = {k: {"mean_return": [], "sharpe": [], "cumulative": [], "max_dd_inv": [], "aum": [], "investors": []} for k in FUND_KINDS}
     if universe is None or universe.empty or window < 2: return ref
+    
+    # Tüm TEFAS evreninin güncel AUM ve Yatırımcı verilerini topla
+    latest = universe.sort_values("date").drop_duplicates(subset=["code"], keep="last")
+    for _, row in latest.iterrows():
+        kind_str = str(row.get("kind", DEFAULT_FUND_KIND)).strip().upper()
+        if kind_str in ref:
+            if safe_float(row.get("aum")) > 0: ref[kind_str]["aum"].append(safe_float(row.get("aum")))
+            if safe_float(row.get("investors")) > 0: ref[kind_str]["investors"].append(safe_float(row.get("investors")))
+
     for code, group in universe.groupby("code"):
         group = group.sort_values("date")
         kind = str(group["kind"].iloc[-1]).strip().upper()
@@ -470,21 +480,31 @@ def fetch_and_compute_one_fund(code: str, universe: pd.DataFrame, meta_map: dict
     metrics["source_chain"] = " → ".join(x.source for x in statuses if x.attempted)
     return code, metrics, source
 
-def calculate_security_scores(funds: List[dict]):
+def calculate_security_scores(funds: List[dict], reference: dict):
     by_kind = defaultdict(list)
     for idx, fund in enumerate(funds): by_kind[fund.get("kind", DEFAULT_FUND_KIND)].append(idx)
     
     for kind, indices in by_kind.items():
         subset = [funds[i] for i in indices]
-        aum_z = zscore([f.get("aum") for f in subset])
-        inv_z = zscore([f.get("investors") for f in subset])
+        
+        # Evrensel (Global) Ortalama ve Standart Sapmayı Çek
+        ref = reference.get(kind, {})
+        aum_m, aum_s = population_mean_std(ref.get("aum", []))
+        inv_m, inv_s = population_mean_std(ref.get("investors", []))
+        
         flow_z = zscore([f.get("aum_flow_proxy") for f in subset])
         inv_c_z = zscore([f.get("inv_change") for f in subset])
         
         for local_i, fund_idx in enumerate(indices):
             f = funds[fund_idx]
-            s = 50.0 + SECURITY_SCALE["aum"] * SECURITY_WEIGHTS["aum"] * aum_z[local_i] + \
-                SECURITY_SCALE["investor"] * SECURITY_WEIGHTS["investor"] * inv_z[local_i]
+            
+            # Sadece yüklenen listeye değil, TÜM TEFAS'a göre Z-Skoru hesapla
+            local_aum_z = zscore_against_population(f.get("aum"), aum_m, aum_s) if aum_s > 0 else zscore([x.get("aum") for x in subset])[local_i]
+            local_inv_z = zscore_against_population(f.get("investors"), inv_m, inv_s) if inv_s > 0 else zscore([x.get("investors") for x in subset])[local_i]
+            
+            s = 50.0 + SECURITY_SCALE["aum"] * SECURITY_WEIGHTS["aum"] * local_aum_z + \
+                SECURITY_SCALE["investor"] * SECURITY_WEIGHTS["investor"] * local_inv_z
+                
             if f.get("aum_flow_proxy") is not None: s += SECURITY_SCALE["aum_flow"] * flow_z[local_i]
             if f.get("inv_change") is not None: s += SECURITY_SCALE["investor_change"] * inv_c_z[local_i]
             
@@ -652,8 +672,8 @@ def create_excel_output(wb, ws_list, all_funds, common_n_days):
 
     # Tarihleri "Bugün"den geriye doğru oluştur
     today_dt = dt.date.today()
-    n_dates = common_n_days if common_n_days > 0 else 5
-    sample_dates = [(today_dt - dt.timedelta(days=(n_dates - 1 - i))).strftime("%d.%m") for i in range(n_dates)]
+    n_dates_to_generate = common_n_days if common_n_days > 0 else 5
+    sample_dates = [(today_dt - dt.timedelta(days=(n_dates_to_generate - 1 - i))).strftime("%d.%m") for i in range(n_dates_to_generate)]
     
     # En sondan başa doğru son 5 gün (Bugün -> Dün -> Önceki Gün)
     last_5_dates = list(reversed(sample_dates[-5:]))
@@ -810,7 +830,7 @@ eligible = [f for f in calc_funds if f.get("n_days", 0) >= MIN_ROLLING_DAYS]
 
 with st.spinner("📊 Kalite denetimi ve skorlar hesaplanıyor..."):
     for f in eligible: audit_fund_data(f)
-    calculate_security_scores(eligible)
+    calculate_security_scores(eligible, ref)  # EVRENSEL Z-SCORE DÜZELTMESİ EKLENDİ
     calculate_market_relative_momentum(eligible, ref, TARGET_TRADING_DAYS)
     common_n = calculate_trend_scores(eligible)
     finalize_decisions(eligible)
