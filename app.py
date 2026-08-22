@@ -32,7 +32,7 @@ def new_init(self, *args, **kwargs):
 PatternFill.__init__ = new_init
 
 # ============================================================
-# KGDM-3 & KAZRİSK - SÜRÜM V10.4 (REST API %100 FIX)
+# KGDM-3 & KAZRİSK - SÜRÜM V10.5 (REST API KESİN ÇÖZÜM)
 # ============================================================
 
 st.set_page_config(
@@ -44,7 +44,7 @@ st.set_page_config(
 st.title("📊 KGDM-3 & KAZRİSK Hibrit Fon Analizi")
 st.caption(
     "TEFAS + TEFAS Direct API + İş Yatırım + Fintables | "
-    "Gemini Canlı Sentiment (REST API) + Evrensel Baseline | V10.4"
+    "Gemini Canlı Sentiment (REST API) + Evrensel Baseline | V10.5"
 )
 
 # ============================================================
@@ -68,7 +68,7 @@ MIN_REFERENCE_SAMPLE = 5
 OVERHEAT_Z_THRESHOLD = 2.0
 OVERHEAT_PENALTY = 6.0
 
-APP_VERSION = "10.4.0"
+APP_VERSION = "10.5.0"
 
 GITHUB_OWNER = "tlgssk"
 GITHUB_REPO = "kgdm3-fon-analiz"
@@ -124,7 +124,7 @@ ENABLE_FILTERS = st.sidebar.checkbox("Filtreleri Etkinleştir", value=False)
 TARGET_WEEKLY_RETURN = st.sidebar.slider("Hedef Haftalık Getiri (%)", -5.0, 10.0, 0.0, 0.10)
 MIN_INVESTOR_COUNT = st.sidebar.slider("Minimum Yatırımcı Sayısı", 0, 100000, 0, 500)
 
-with st.sidebar.expander("⚖️ Skor Ağırlıkları (V10.4)"):
+with st.sidebar.expander("⚖️ Skor Ağırlıkları (V10.5)"):
     w_return = st.slider("Getiri ağırlığı", 0.0, 1.0, DEFAULT_MOMENTUM_WEIGHTS["return"], 0.05)
     w_sharpe = st.slider("Sharpe ağırlığı", 0.0, 1.0, DEFAULT_MOMENTUM_WEIGHTS["sharpe"], 0.05)
     w_cumulative = st.slider("Kümülatif ağırlığı", 0.0, 1.0, DEFAULT_MOMENTUM_WEIGHTS["cumulative"], 0.05)
@@ -155,14 +155,17 @@ SHOW_DIAGNOSTICS = st.sidebar.checkbox("Kaynak tanılama bilgisini göster", val
 
 
 # ============================================================
-# CANLI GEMINI DUYARLILIK (MARKET SENTIMENT) MOTORU - V10.4 REST API
+# CANLI GEMINI DUYARLILIK (MARKET SENTIMENT) MOTORU - V10.5
 # ============================================================
 
 @st.cache_data(ttl=60 * 60 * 4, show_spinner=False)
 def fetch_market_sentiment(investment_area: str, api_key: str) -> dict:
     area = str(investment_area).strip()
+    
+    # API Anahtarındaki olası boşlukları otomatik temizler
+    api_key_clean = api_key.strip() if api_key else ""
 
-    if not api_key:
+    if not api_key_clean:
         area_upper = area.upper()
         if "YABANCI TEKNOLOJİ" in area_upper or "YABANCI" in area_upper:
             return {"score": 38, "label": "Negatif (Kâr Satışı)", "ai_active": False, "ai_reason": "API Anahtarı Girilmedi"}
@@ -188,37 +191,46 @@ GÖREV:
    - 75-100: Güçlü Alım / Ralli / Yoğun Pozitif Beklenti
 2. En fazla 6 kelimelik kısa bir gerekçe etiketi üret.
 
-Sadece ve sadece aşağıdaki JSON şemasında çıktı ver, format dışında hiçbir kelime yazma:
+Sadece JSON formatında çıktı ver:
 {{"score": 75, "label": "Gerekçe etiketi"}}
 """
         
-        # REST API DOĞRUDAN İSTEK (KÜTÜPHANESİZ %100 GARANTİLİ)
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+        # REST API DOĞRUDAN İSTEK (Tam JSON Uyumlu)
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key_clean}"
         headers = {'Content-Type': 'application/json'}
         payload = {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"temperature": 0.2}
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [{"text": prompt}]
+                }
+            ],
+            "generationConfig": {
+                "temperature": 0.2,
+                "responseMimeType": "application/json"
+            }
         }
         
         response = requests.post(url, headers=headers, json=payload, timeout=15)
         
+        # Eğer Hata Varsa Tam Olarak Nedenini Yakala
         if response.status_code != 200:
+            try:
+                err_data = response.json()
+                err_msg = err_data.get("error", {}).get("message", str(err_data))
+            except:
+                err_msg = response.text[:100]
+                
             return {
                 "score": 50, 
                 "label": "Nötr", 
                 "ai_active": False, 
-                "ai_reason": f"API HTTP Hatası: {response.status_code} ({response.text[:30]})"
+                "ai_reason": f"Google Hatası: {err_msg}"
             }
             
         data = response.json()
         raw_text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "{}")
         
-        # JSON'ı Güvenli Temizleme
-        raw_text = raw_text.strip()
-        if raw_text.startswith("```json"): raw_text = raw_text[7:]
-        elif raw_text.startswith("```"): raw_text = raw_text[3:]
-        if raw_text.endswith("```"): raw_text = raw_text[:-3]
-            
         parsed_data = json.loads(raw_text.strip())
         
         return {
@@ -232,8 +244,9 @@ Sadece ve sadece aşağıdaki JSON şemasında çıktı ver, format dışında h
             "score": 50, 
             "label": "Nötr", 
             "ai_active": False, 
-            "ai_reason": f"Kod Hatası: {str(exc)[:40]}"
+            "ai_reason": f"Kod Hatası: {str(exc)[:60]}"
         }
+
 
 # ============================================================
 # VERİ KALİTESİ + MATEMATİKSEL TUTARLILIK DENETİMİ
@@ -372,7 +385,7 @@ def build_http_session() -> requests.Session:
     adapter = HTTPAdapter(max_retries=retry, pool_connections=MAX_WORKERS, pool_maxsize=MAX_WORKERS)
     session.mount("https://", adapter)
     session.mount("http://", adapter)
-    session.headers.update({"User-Agent": "KGDM3-Fon-Analiz/10.4", "Accept": "application/json,text/html"})
+    session.headers.update({"User-Agent": "KGDM3-Fon-Analiz/10.5", "Accept": "application/json,text/html"})
     return session
 
 HTTP = build_http_session()
@@ -457,7 +470,7 @@ def fetch_isyatirim_series(fund_code: str):
     status = new_status("İş Yatırım")
     end = dt.datetime.now()
     start = end - dt.timedelta(days=LOOKBACK_CALENDAR_DAYS)
-    url = "[https://www.isyatirim.com.tr/_layouts/15/IsYatirim.Website/Common/Data.aspx/YatirimFonGecmisGetiri](https://www.isyatirim.com.tr/_layouts/15/IsYatirim.Website/Common/Data.aspx/YatirimFonGecmisGetiri)"
+    url = "https://www.isyatirim.com.tr/_layouts/15/IsYatirim.Website/Common/Data.aspx/YatirimFonGecmisGetiri"
     params = {"fonKod": code, "baslangic": start.strftime("%d-%m-%Y"), "bitis": end.strftime("%d-%m-%Y")}
     response, status = request_with_status("İş Yatırım", "GET", url, params=params, headers={"Accept": "application/json"})
     if response and status.ok:
@@ -477,8 +490,8 @@ def fetch_tefas_direct_api(fund_code: str, fund_kind: Optional[str] = None):
     status = new_status("TEFAS Direct API")
     end = dt.datetime.now()
     start = end - dt.timedelta(days=LOOKBACK_CALENDAR_DAYS)
-    url = "[https://www.tefas.gov.tr/api/DB/BindHistoryInfo](https://www.tefas.gov.tr/api/DB/BindHistoryInfo)"
-    headers = {"X-Requested-With": "XMLHttpRequest", "Origin": "[https://www.tefas.gov.tr](https://www.tefas.gov.tr)"}
+    url = "https://www.tefas.gov.tr/api/DB/BindHistoryInfo"
+    headers = {"X-Requested-With": "XMLHttpRequest", "Origin": "https://www.tefas.gov.tr"}
     for kind in ([fund_kind] if fund_kind in FUND_KINDS else list(FUND_KINDS)):
         payload = {"fontip": kind, "fonkod": code, "bastarih": start.strftime("%d.%m.%Y"), "bittarih": end.strftime("%d.%m.%Y")}
         res, stat = request_with_status("TEFAS Direct API", "POST", url, data=payload, headers=headers)
@@ -765,6 +778,7 @@ def calculate_confidence_score(fund: dict) -> int:
     if fund.get("aum") is not None and safe_float(fund.get("aum")) > 0: score += 5
     return int(round(clamp(score, 0, 100)))
 
+
 # ============================================================
 # EXCEL ÇIKTISI
 # ============================================================
@@ -948,7 +962,7 @@ output = create_excel_output(wb, ws_list, eligible, common_n)
 # SKOR ÖZETLERİ VE EKRAN TABLOSU
 # ============================================================
 
-st.subheader("📈 KAZRİSK Portföy Özeti (V10.4)")
+st.subheader("📈 KAZRİSK Portföy Özeti (V10.5)")
 col1, col2, col3, col4 = st.columns(4)
 scores = [safe_float(x.get("decision_score")) for x in eligible if x.get("decision_score") is not None]
 if scores:
@@ -1022,7 +1036,7 @@ try:
 except AttributeError:
     styled_df = df_display.style.applymap(color_cells)
 
-st.subheader("📊 Analiz Sonuçları (V10.4)")
+st.subheader("📊 Analiz Sonuçları (V10.5)")
 st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
 # ============================================================
@@ -1049,11 +1063,11 @@ if sell_alerts or buy_alerts:
         else:
             st.success("Şu an teyitli 'Güçlü Al' fırsatı veren fon yok.")
 
-st.success(f"✅ V10.4 Analiz tamamlandı. Toplam {len(eligible)} fon işlendi.")
+st.success(f"✅ V10.5 Analiz tamamlandı. Toplam {len(eligible)} fon işlendi.")
 st.download_button(
-    label="📥 KAZRİSK V10.4 Excel İndir",
+    label="📥 KAZRİSK V10.5 Excel İndir",
     data=output,
-    file_name="fonlar_KGDM3_KAZRISK_FINAL_V10_4.xlsx",
+    file_name="fonlar_KGDM3_KAZRISK_FINAL_V10_5.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
 
