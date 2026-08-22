@@ -21,6 +21,18 @@ from openpyxl.utils import get_column_letter
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+# ============================================================
+# OPENPYXL 'extLst' HATASI İÇİN ÇALIŞMA ZAMANI YAMASI
+# Excel dosyalarındaki bilinmeyen dolgu parametresini yoksayar.
+# ============================================================
+original_init = PatternFill.__init__
+def new_init(self, *args, **kwargs):
+    if 'extLst' in kwargs:
+        del kwargs['extLst']
+    original_init(self, *args, **kwargs)
+PatternFill.__init__ = new_init
+# ============================================================
+
 # Google GenAI SDK (Opsiyonel / Hata fırlatmaz)
 try:
     from google import genai
@@ -660,7 +672,7 @@ def build_fund_meta_map(universe: pd.DataFrame) -> Dict[str, Dict[str, str]]:
 
 
 def build_universe_reference(universe: pd.DataFrame, window: int) -> Dict[str, Dict[str, List[float]]]:
-    # Evrensel Baseline için AUM ve Yatırımcı da eklenmiştir
+    # Evrensel Baseline için AUM ve Yatırımcı eklendi
     ref = {
         k: {
             "mean_return": [],
@@ -943,6 +955,8 @@ def calculate_security_scores(funds: List[dict], reference: dict):
 
         for local_i, fund_idx in enumerate(indices):
             f = funds[fund_idx]
+            
+            # YENİ: Sadece yüklenen listeye değil, TÜM TEFAS'a göre Z-Skoru hesapla
             local_aum_z = zscore_against_population(f.get("aum"), aum_m, aum_s) if aum_s > 0 else zscore([x.get("aum") for x in subset])[local_i]
             local_inv_z = zscore_against_population(f.get("investors"), inv_m, inv_s) if inv_s > 0 else zscore([x.get("investors") for x in subset])[local_i]
 
