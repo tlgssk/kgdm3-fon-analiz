@@ -56,6 +56,41 @@ st.title("📊 KGDM-3 & KAZRİSK Hibrit Fon Analizi")
 st.caption(
     "TEFAS + TEFAS Direct API + İş Yatırım + Fintables | "
     "Gemini Canlı Sentiment + Evrensel Baseline + Kalite Denetimi | V10.0"
+    "Harika bir noktaya ulaştık! V10.0 sürümü ile birlikte KAZRİSK sisteminiz, geçmiş verileri alt alta dizen basit bir takip tablosu olmaktan çıkıp; kendi verisini denetleyen, piyasa haberlerini okuyan ve geleceği öngörmeye çalışan **Yapay Zeka Destekli bir Robo-Danışman** seviyesine yükseldi.
+
+İşte bu kod ile elinizin altında olan üst düzey yetenekler:
+
+### 🧠 1. Yapay Zeka Duyarlılık Motoru (Gemini Sentiment)
+
+* **Ne Yapar?:** Kenar çubuğuna girdiğiniz Gemini API anahtarı ile Google'ın yapay zekasını sisteme bağlar. Sadece fiyat grafiklerine bakmakla kalmaz; hisse senedi, altın veya para piyasası için o anki küresel makroekonomik haberleri ve beklentileri saniyeler içinde analiz eder.
+* **Avantajı:** Fona $0-100$ arası bir **Sentiment Skoru** ve *"Faiz indirimi beklentisiyle güçlü"* gibi bir etiket atar. Karar formülü artık sadece geçmişe (Momentum) değil, geleceğe (Beklenti) de tepki verir.
+
+### 🎯 2. Evrensel Puanlama (Mutlak Z-Score Doğruluğu)
+
+* **Ne Yapar?:** Sisteme sadece kendi seçtiğiniz 5 kaliteli fonu da yükleseniz, tüm TEFAS'taki 450 fonu da yükleseniz puanlar **birebir aynı** çıkar.
+* **Avantajı:** Sistem yüklediğiniz listeyi kendi içinde yarıştırmaz (Z-Score yanılgısını çözer). Arka planda tüm TEFAS evreninin güncel hacim, yatırımcı ve getiri ortalamalarını referans (Baseline) alarak fonunuza "Türkiye piyasasına göre gerçek notunu" verir.
+
+### 🚨🚀 3. Çift Yönlü Erken Uyarı Radarı
+
+* **Ne Yapar?:** Web arayüzünün en altında ekranı ikiye böler. Sol tarafta **🚨 Satış Alarmlarını**, sağ tarafta **🚀 Fırsat Alarmlarını** gösterir.
+* **Avantajı:** Piyasada anlık bir çöküş veya sıçrama olduğunda "Testere Piyasası" (yanıltıcı sinyal) kurbanı olmanızı engeller. Sadece **2 gün üst üste** aynı sert sinyali ("Güçlü Al" veya "Acil Sat") veren fonları karşınıza çıkararak "teyitli" aksiyon almanızı sağlar.
+
+### 🕵️‍♂️ 4. Adli Veri Denetimi (Data Quality Audit)
+
+* **Ne Yapar?:** TEFAS'tan, İş Yatırım'dan veya Fintables'tan gelen verileri körü körüne doğru kabul etmez. Fonların fiyat-getiri tutarlılığını on binde beş (`0.0005`) toleransla denetler.
+* **Avantajı:** Veri eksikse, fiyatlar pozitif değilse veya tarih sırası bozuksa fonun "Veri Kalitesi Skorunu" düşürür ve excel'in en sağına **Kalite Uyarıları** (Örn: *Getiri-fiyat tutarsızlığı*) notunu düşer.
+
+### 🛡️ 5. KAZRİSK Konsantrasyon Kalkanı (HHI)
+
+* **Ne Yapar?:** Fonun portföy dağılımını (Hisse, Ters Repo, Mevduat) inceler. Bir fon sadece tek bir varlık sınıfına (örneğin %90 tek bir holdinge) yığılmışsa HHI (Herfindahl-Hirschman Endeksi) hesaplamasıyla bu riski tespit eder.
+* **Avantajı:** Riski yüksek fonların Güvenlik Skorunu acımasızca keser ve size "⚠️ Yüksek Konsantrasyon" uyarısı verir. Bekleme odasındaki nakdiniz (PNU fonunuz) için de "Net Likidite (%)" gücünü hesaplar.
+
+### 📅 6. Dinamik ve Kusursuz Excel Çıktısı
+
+* **Ne Yapar?:** `openpyxl`'in meşhur `extLst` yükleme hatası kalıcı olarak yamalandı (Monkey-Patch).
+* **Avantajı:** Excel raporunuzdaki tarihler eski usül sondan başa değil; **D Sütunundan başlayarak "Bugün -> Dün -> Önceki Gün"** şeklinde en güncelden eskiye doğru sıralanır. Yüzde (`%`) formatları ve Kırmızı/Sarı/Yeşil ısı haritaları tüm geçmiş günlere kusursuz işler.
+
+**Özetle:** Artık fon sepetinizi yönetirken sadece bir Excel tablosuna değil; veriyi doğrulayan, Türkiye piyasasını baştan uca tarayan, haber akışını yapay zeka ile okuyan ve size her sabah *"Bugün bu fonu satmalı mıyım?"* sorusunun cevabını teyitli olarak veren kurumsal düzeyde bir sisteme sahipsiniz."
 )
 
 
