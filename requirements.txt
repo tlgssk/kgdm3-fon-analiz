@@ -7,3 +7,4 @@ requests
 cloudscraper
 tefas
 webdriver_manager
+google-genai
