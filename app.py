@@ -42,7 +42,7 @@ except ImportError:
 
 
 # ============================================================
-# KGDM-3 & KAZRİSK - SÜRÜM V10.1
+# KGDM-3 & KAZRİSK - SÜRÜM V10.2 (AI DEBUG YAMASI)
 # ============================================================
 
 st.set_page_config(
@@ -54,7 +54,7 @@ st.set_page_config(
 st.title("📊 KGDM-3 & KAZRİSK Hibrit Fon Analizi")
 st.caption(
     "TEFAS + TEFAS Direct API + İş Yatırım + Fintables | "
-    "Gemini Canlı Sentiment + Evrensel Baseline + Kalite Denetimi | V10.1"
+    "Gemini Canlı Sentiment + Evrensel Baseline + Kalite Denetimi | V10.2"
 )
 
 # ============================================================
@@ -78,7 +78,7 @@ MIN_REFERENCE_SAMPLE = 5
 OVERHEAT_Z_THRESHOLD = 2.0
 OVERHEAT_PENALTY = 6.0
 
-APP_VERSION = "10.1.0"
+APP_VERSION = "10.2.0"
 
 GITHUB_OWNER = "tlgssk"
 GITHUB_REPO = "kgdm3-fon-analiz"
@@ -136,7 +136,7 @@ ENABLE_FILTERS = st.sidebar.checkbox("Filtreleri Etkinleştir", value=False)
 TARGET_WEEKLY_RETURN = st.sidebar.slider("Hedef Haftalık Getiri (%)", -5.0, 10.0, 0.0, 0.10)
 MIN_INVESTOR_COUNT = st.sidebar.slider("Minimum Yatırımcı Sayısı", 0, 100000, 0, 500)
 
-with st.sidebar.expander("⚖️ Skor Ağırlıkları (V10.1)"):
+with st.sidebar.expander("⚖️ Skor Ağırlıkları (V10.2)"):
     w_return = st.slider("Getiri ağırlığı", 0.0, 1.0, DEFAULT_MOMENTUM_WEIGHTS["return"], 0.05)
     w_sharpe = st.slider("Sharpe ağırlığı", 0.0, 1.0, DEFAULT_MOMENTUM_WEIGHTS["sharpe"], 0.05)
     w_cumulative = st.slider("Kümülatif ağırlığı", 0.0, 1.0, DEFAULT_MOMENTUM_WEIGHTS["cumulative"], 0.05)
@@ -166,25 +166,31 @@ with st.sidebar.expander("⚖️ Skor Ağırlıkları (V10.1)"):
 SHOW_DIAGNOSTICS = st.sidebar.checkbox("Kaynak tanılama bilgisini göster", value=True)
 
 # ============================================================
-# CANLI GEMINI DUYARLILIK (MARKET SENTIMENT) MOTORU - AI BAYRAKLI
+# CANLI GEMINI DUYARLILIK (MARKET SENTIMENT) MOTORU - DEBUG EKLENDİ
 # ============================================================
 
 @st.cache_data(ttl=60 * 60 * 4, show_spinner=False)
 def fetch_market_sentiment(investment_area: str, api_key: str) -> dict:
     area = str(investment_area).strip()
 
-    if not api_key or not GENAI_AVAILABLE:
-        # API Anahtarı yoksa kural tabanlı simülasyon (ai_active = False)
+    # Neden Pasif olduğunu anlamak için hata tespiti:
+    error_reason = ""
+    if not api_key:
+        error_reason = "API Anahtarı Girilmedi"
+    elif not GENAI_AVAILABLE:
+        error_reason = "google-genai Kütüphanesi Bulunamadı"
+
+    if error_reason:
         area_upper = area.upper()
         if "YABANCI TEKNOLOJİ" in area_upper or "YABANCI" in area_upper:
-            return {"score": 38, "label": "Negatif (Kâr Satışı)", "ai_active": False}
+            return {"score": 38, "label": "Negatif (Kâr Satışı)", "ai_active": False, "ai_reason": error_reason}
         elif "ALTIN" in area_upper or "GÜMÜŞ" in area_upper or "KIYMETLİ" in area_upper:
-            return {"score": 82, "label": "Güçlü Pozitif (Faiz İndirimi)", "ai_active": False}
+            return {"score": 82, "label": "Güçlü Pozitif (Faiz İndirimi)", "ai_active": False, "ai_reason": error_reason}
         elif "PARA PİYASASI" in area_upper or "BORÇLANMA" in area_upper:
-            return {"score": 65, "label": "Pozitif (Sabit Getiri)", "ai_active": False}
+            return {"score": 65, "label": "Pozitif (Sabit Getiri)", "ai_active": False, "ai_reason": error_reason}
         elif "HİSSE" in area_upper or "BIST" in area_upper:
-            return {"score": 54, "label": "Dengeli / Pozitif Beklenti", "ai_active": False}
-        return {"score": 50, "label": "Nötr / Kural Tabanlı", "ai_active": False}
+            return {"score": 54, "label": "Dengeli / Pozitif Beklenti", "ai_active": False, "ai_reason": error_reason}
+        return {"score": 50, "label": "Nötr / Kural Tabanlı", "ai_active": False, "ai_reason": error_reason}
 
     try:
         client = genai.Client(api_key=api_key)
@@ -213,10 +219,16 @@ Sadece ve sadece aşağıdaki JSON şemasında çıktı ver:
         return {
             "score": int(clamp(safe_float(data.get("score", 50)), 0.0, 100.0)),
             "label": str(data.get("label", "Nötr")),
-            "ai_active": True # Gemini başarıyla çalıştı
+            "ai_active": True,
+            "ai_reason": "Bağlantı Başarılı"
         }
     except Exception as exc:
-        return {"score": 50, "label": f"Nötr (API Hatası: {str(exc)[:20]})", "ai_active": False}
+        return {
+            "score": 50, 
+            "label": "Nötr", 
+            "ai_active": False, 
+            "ai_reason": f"API Hatası: {str(exc)[:40]}"
+        }
 
 # ============================================================
 # VERİ KALİTESİ + MATEMATİKSEL TUTARLILIK DENETİMİ
@@ -355,7 +367,7 @@ def build_http_session() -> requests.Session:
     adapter = HTTPAdapter(max_retries=retry, pool_connections=MAX_WORKERS, pool_maxsize=MAX_WORKERS)
     session.mount("https://", adapter)
     session.mount("http://", adapter)
-    session.headers.update({"User-Agent": "KGDM3-Fon-Analiz/10.1", "Accept": "application/json,text/html"})
+    session.headers.update({"User-Agent": "KGDM3-Fon-Analiz/10.2", "Accept": "application/json,text/html"})
     return session
 
 HTTP = build_http_session()
@@ -724,7 +736,11 @@ def finalize_decisions(funds: List[dict], api_key: str = ""):
 
         sent_data = fetch_market_sentiment(f.get("investment_area"), api_key)
         sent = sent_data["score"]
-        f["sentiment_score"], f["sentiment_label"], f["sentiment_ai_active"] = sent, sent_data["label"], sent_data.get("ai_active", False)
+        
+        f["sentiment_score"] = sent
+        f["sentiment_label"] = sent_data["label"]
+        f["sentiment_ai_active"] = sent_data.get("ai_active", False)
+        f["sentiment_ai_reason"] = sent_data.get("ai_reason", "Bilinmiyor")
 
         dec = int(round(clamp(mom * HYBRID_MOMENTUM_WEIGHT + sec * HYBRID_SECURITY_WEIGHT + sent * HYBRID_SENTIMENT_WEIGHT, 0.0, 100.0)))
         f["decision_score"], f["karar"] = dec, decision_label_from_score(dec)
@@ -929,7 +945,7 @@ output = create_excel_output(wb, ws_list, eligible, common_n)
 # SKOR ÖZETLERİ VE EKRAN TABLOSU
 # ============================================================
 
-st.subheader("📈 KAZRİSK Portföy Özeti (V10.1)")
+st.subheader("📈 KAZRİSK Portföy Özeti (V10.2)")
 col1, col2, col3, col4 = st.columns(4)
 scores = [safe_float(x.get("decision_score")) for x in eligible if x.get("decision_score") is not None]
 if scores:
@@ -1003,7 +1019,7 @@ try:
 except AttributeError:
     styled_df = df_display.style.applymap(color_cells)
 
-st.subheader("📊 Analiz Sonuçları (V10.1)")
+st.subheader("📊 Analiz Sonuçları (V10.2)")
 st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
 # ============================================================
@@ -1030,11 +1046,11 @@ if sell_alerts or buy_alerts:
         else:
             st.success("Şu an teyitli 'Güçlü Al' fırsatı veren fon yok.")
 
-st.success(f"✅ V10.1 Analiz tamamlandı. Toplam {len(eligible)} fon işlendi.")
+st.success(f"✅ V10.2 Analiz tamamlandı. Toplam {len(eligible)} fon işlendi.")
 st.download_button(
-    label="📥 KAZRİSK V10.1 Excel İndir",
+    label="📥 KAZRİSK V10.2 Excel İndir",
     data=output,
-    file_name="fonlar_KGDM3_KAZRISK_FINAL_V10_1.xlsx",
+    file_name="fonlar_KGDM3_KAZRISK_FINAL_V10_2.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
 
@@ -1045,8 +1061,14 @@ if SHOW_DIAGNOSTICS:
     st.subheader("🔎 Veri Kaynağı Tanılaması & Gemini AI Modu")
     diagnostic_rows = []
     for item in eligible:
-        # Yeni Sütun: AI Bayrağı
-        ai_status = "🟢 Aktif (Canlı API)" if item.get("sentiment_ai_active") else "🔴 Pasif (Kural Tabanlı)"
+        
+        # EĞER PASİFSE SEBEBİNİ YANINA YAZDIR:
+        reason = item.get("sentiment_ai_reason", "Bilinmiyor")
+        if item.get("sentiment_ai_active"):
+            ai_status = "🟢 Aktif (Canlı API)"
+        else:
+            ai_status = f"🔴 Pasif ({reason})"
+
         for status in item.get("source_statuses", []):
             diagnostic_rows.append({
                 "Fon": item["code"],
@@ -1055,7 +1077,6 @@ if SHOW_DIAGNOSTICS:
                 "Başarılı": "Evet" if status.get("ok") else "Hayır",
                 "HTTP": status.get("status_code"),
                 "Hata": status.get("error_type"),
-                "Mesaj": status.get("message"),
                 "Süre ms": status.get("elapsed_ms"),
                 "Gemini AI Modu": ai_status
             })
@@ -1064,8 +1085,8 @@ if SHOW_DIAGNOSTICS:
         df_diag = pd.DataFrame(diagnostic_rows)
         def color_ai_status(val):
             if isinstance(val, str):
-                if "Aktif" in val: return 'color: #008000; font-weight: bold;'
-                elif "Pasif" in val: return 'color: #FF0000; font-weight: bold;'
+                if "🟢 Aktif" in val: return 'color: #008000; font-weight: bold;'
+                elif "🔴 Pasif" in val: return 'color: #FF0000; font-weight: bold;'
             return ''
             
         try: styled_diag = df_diag.style.map(color_ai_status)
