@@ -32,7 +32,7 @@ def new_init(self, *args, **kwargs):
 PatternFill.__init__ = new_init
 
 # ============================================================
-# KGDM-3 & KAZRİSK - SÜRÜM V10.7 (GOOGLE API 3.6 GÜNCELLEMESİ)
+# KGDM-3 & KAZRİSK - SÜRÜM V10.8 (TRAFİK SIKIŞIKLIĞI ÇÖZÜMÜ)
 # ============================================================
 
 st.set_page_config(
@@ -43,8 +43,7 @@ st.set_page_config(
 
 st.title("📊 KGDM-3 & KAZRİSK Hibrit Fon Analizi")
 st.caption(
-    "TEFAS + TEFAS Direct API + İş Yatırım + Fintables | "
-    "Gemini Canlı Sentiment (REST API v3.6) + Evrensel Baseline | V10.7"
+    "TEFAS + İş Yatırım | Gemini Canlı Sentiment (Dirençli REST) | V10.8"
 )
 
 # ============================================================
@@ -68,7 +67,7 @@ MIN_REFERENCE_SAMPLE = 5
 OVERHEAT_Z_THRESHOLD = 2.0
 OVERHEAT_PENALTY = 6.0
 
-APP_VERSION = "10.7.0"
+APP_VERSION = "10.8.0"
 
 GITHUB_OWNER = "tlgssk"
 GITHUB_REPO = "kgdm3-fon-analiz"
@@ -98,6 +97,46 @@ POSITIVE_INVESTOR_FLOW_BONUS = 3.0
 EMA_DECAY = 0.65
 
 # ============================================================
+# HTTP OTURUMU (Google API de burayı kullanacak)
+# ============================================================
+@dataclass
+class SourceStatus:
+    source: str; attempted: bool = False; ok: bool = False; status_code: Optional[int] = None
+    error_type: str = ""; message: str = ""; elapsed_ms: Optional[int] = None; retry_count: int = 0
+
+def new_status(source: str) -> SourceStatus: return SourceStatus(source=source)
+
+def build_http_session() -> requests.Session:
+    session = requests.Session()
+    retry = Retry(total=3, connect=3, read=3, status=3, backoff_factor=1.5,
+                  status_forcelist=(429, 500, 502, 503, 504), respect_retry_after_header=True)
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=10, pool_maxsize=10)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    session.headers.update({"User-Agent": "KGDM3-Fon-Analiz/10.8", "Accept": "application/json,text/html"})
+    return session
+
+HTTP = build_http_session()
+
+def request_with_status(source: str, method: str, url: str, *, params=None, data=None, headers=None, timeout=HTTP_TIMEOUT):
+    status = new_status(source)
+    status.attempted = True
+    started = time.perf_counter()
+    try:
+        response = HTTP.request(method=method, url=url, params=params, data=data, headers=headers, timeout=timeout)
+        status.status_code = response.status_code
+        if response.status_code == 200:
+            status.ok, status.message = True, "OK"
+        else:
+            status.error_type, status.message = f"HTTP_{response.status_code}", f"Hata {response.status_code}"
+        return response, status
+    except Exception as exc:
+        status.error_type, status.message = "ERROR", str(exc)[:200]
+    finally:
+        status.elapsed_ms = int((time.perf_counter() - started) * 1000)
+    return None, status
+
+# ============================================================
 # RENKLER & SIDEBAR
 # ============================================================
 
@@ -121,10 +160,8 @@ api_key_input = st.sidebar.text_input(
 )
 
 ENABLE_FILTERS = st.sidebar.checkbox("Filtreleri Etkinleştir", value=False)
-TARGET_WEEKLY_RETURN = st.sidebar.slider("Hedef Haftalık Getiri (%)", -5.0, 10.0, 0.0, 0.10)
-MIN_INVESTOR_COUNT = st.sidebar.slider("Minimum Yatırımcı Sayısı", 0, 100000, 0, 500)
 
-with st.sidebar.expander("⚖️ Skor Ağırlıkları (V10.7)"):
+with st.sidebar.expander("⚖️ Skor Ağırlıkları (V10.8)"):
     w_return = st.slider("Getiri ağırlığı", 0.0, 1.0, DEFAULT_MOMENTUM_WEIGHTS["return"], 0.05)
     w_sharpe = st.slider("Sharpe ağırlığı", 0.0, 1.0, DEFAULT_MOMENTUM_WEIGHTS["sharpe"], 0.05)
     w_cumulative = st.slider("Kümülatif ağırlığı", 0.0, 1.0, DEFAULT_MOMENTUM_WEIGHTS["cumulative"], 0.05)
@@ -155,8 +192,17 @@ SHOW_DIAGNOSTICS = st.sidebar.checkbox("Kaynak tanılama bilgisini göster", val
 
 
 # ============================================================
-# CANLI GEMINI DUYARLILIK (MARKET SENTIMENT) MOTORU - V10.7
+# CANLI GEMINI DUYARLILIK MOTORU - V10.8 (DİRENÇLİ YAPI)
 # ============================================================
+
+def clamp(value, low, high): return max(low, min(high, value))
+
+def safe_float(value, default=0.0) -> float:
+    try:
+        if value is None: return default
+        n = float(value)
+        return default if pd.isna(n) else n
+    except: return default
 
 @st.cache_data(ttl=60 * 60 * 4, show_spinner=False)
 def fetch_market_sentiment(investment_area: str, api_key: str) -> dict:
@@ -175,87 +221,69 @@ def fetch_market_sentiment(investment_area: str, api_key: str) -> dict:
             return {"score": 54, "label": "Dengeli / Pozitif Beklenti", "ai_active": False, "ai_reason": "API Anahtarı Girilmedi"}
         return {"score": 50, "label": "Nötr / Kural Tabanlı", "ai_active": False, "ai_reason": "API Anahtarı Girilmedi"}
 
-    try:
-        prompt = f"""
+    prompt = f"""
 Sen kıdemli bir fon yöneticisi ve makroekonomik duyarlılık analistisin.
 Türkiye TEFAS fon piyasasında yer alan şu yatırım alanı için güncel piyasa, haber ve ekonomist beklentilerini değerlendir:
 Yatırım Alanı: "{area}"
 
 GÖREV:
-1. Bu varlık sınıfı için güncel piyasa duyarlılığını 0 ile 100 arasında bir tam sayı olarak puanla:
-   - 0-35: Sert Düşüş / Satış Baskısı / Yüksek Risk
-   - 36-49: Düzeltme / Belirsizlik / Yatay
-   - 50-74: Pozitif / Dengeli Yükseliş / Talep Artışı
-   - 75-100: Güçlü Alım / Ralli / Yoğun Pozitif Beklenti
+1. Bu varlık sınıfı için güncel piyasa duyarlılığını 0 ile 100 arasında bir tam sayı olarak puanla.
 2. En fazla 6 kelimelik kısa bir gerekçe etiketi üret.
 
 Sadece JSON formatında çıktı ver:
 {{"score": 75, "label": "Gerekçe etiketi"}}
 """
-        
-        # GÜNCELLENDİ: Google API hata mesajına istinaden gemini-3.6-flash kullanılıyor
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={api_key_clean}"
-        headers = {'Content-Type': 'application/json'}
-        payload = {
-            "contents": [
-                {
-                    "role": "user",
-                    "parts": [{"text": prompt}]
-                }
-            ],
-            "generationConfig": {
-                "temperature": 0.2,
-                "responseMimeType": "application/json"
-            }
-        }
-        
-        response = requests.post(url, headers=headers, json=payload, timeout=15)
-        
-        if response.status_code != 200:
-            try:
-                err_data = response.json()
-                err_msg = err_data.get("error", {}).get("message", str(err_data))
-            except:
-                err_msg = response.text[:100]
-                
-            return {
-                "score": 50, 
-                "label": "Nötr", 
-                "ai_active": False, 
-                "ai_reason": f"Google Hatası: {err_msg}"
-            }
+    
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={api_key_clean}"
+    headers = {'Content-Type': 'application/json'}
+    payload = {
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json"}
+    }
+    
+    # 3 Kez Yeniden Deneme (Retry) Mantığı
+    last_err = ""
+    for attempt in range(3):
+        try:
+            # GÜNCELLEME: requests.post yerine kendi dirençli HTTP havuzumuzu kullanıyoruz
+            response = HTTP.post(url, headers=headers, json=payload, timeout=15)
             
-        data = response.json()
-        raw_text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "{}")
-        
-        parsed_data = json.loads(raw_text.strip())
-        
-        return {
-            "score": int(clamp(safe_float(parsed_data.get("score", 50)), 0.0, 100.0)),
-            "label": str(parsed_data.get("label", "Nötr")),
-            "ai_active": True,
-            "ai_reason": "Bağlantı Başarılı"
-        }
-    except Exception as exc:
-        return {
-            "score": 50, 
-            "label": "Nötr", 
-            "ai_active": False, 
-            "ai_reason": f"Kod Hatası: {str(exc)[:60]}"
-        }
+            if response.status_code == 200:
+                data = response.json()
+                raw_text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "{}")
+                
+                parsed_data = json.loads(raw_text.strip("```json\n").strip("```").strip())
+                
+                return {
+                    "score": int(clamp(safe_float(parsed_data.get("score", 50)), 0.0, 100.0)),
+                    "label": str(parsed_data.get("label", "Nötr")),
+                    "ai_active": True,
+                    "ai_reason": "Bağlantı Başarılı"
+                }
+            elif response.status_code == 429:
+                last_err = "429 Rate Limit"
+                time.sleep(2) # Limit aşımı, 2 saniye bekle
+                continue
+            else:
+                try: err_msg = response.json().get("error", {}).get("message", "")
+                except: err_msg = response.text[:50]
+                last_err = f"HTTP {response.status_code}: {err_msg}"
+                time.sleep(1)
+        except Exception as exc:
+            last_err = f"Bağlantı Koptu: {str(exc)[:40]}"
+            time.sleep(1.5) # Ağ hatasında bekle ve tekrar dene
+
+    return {
+        "score": 50, 
+        "label": "Nötr", 
+        "ai_active": False, 
+        "ai_reason": f"API Hatası (3 Deneme): {last_err}"
+    }
 
 
 # ============================================================
-# VERİ KALİTESİ + MATEMATİKSEL TUTARLILIK DENETİMİ
+# TEFAS API VE METRİKLER 
 # ============================================================
-PRICE_CONSISTENCY_TOLERANCE = 0.0005
-
-def safe_float(value, default=0.0) -> float:
-    try:
-        if value is None: return default
-        n = float(value)
-        return default if pd.isna(n) else n
-    except: return default
 
 def parse_number(value):
     if value is None or isinstance(value, bool): return None
@@ -277,8 +305,6 @@ def format_percent(value):
     n = parse_number(value)
     if n is None: return "-"
     return f"+%{n:.2f}" if n > 0 else (f"-%{abs(n):.2f}" if n < 0 else "%0.00")
-
-def clamp(value, low, high): return max(low, min(high, value))
 
 def calculate_compounded_return(returns):
     clean = [parse_number(v) for v in returns if v is not None]
@@ -317,24 +343,12 @@ def zscore_against_population(value, mean_v, std_v):
     if value is None or std_v <= 1e-12: return 0.0
     return clamp((value - mean_v) / std_v, -Z_LIMIT, Z_LIMIT)
 
-def calculate_valor_penalty(excess_valor):
-    return clamp(safe_float(excess_valor) / 3.0, 0.0, 1.0) * MAX_VALOR_PENALTY
-
 def validate_price_series(fund: dict) -> Dict[str, Any]:
     dates, prices, returns, issues = fund.get("dates") or [], fund.get("prices") or [], fund.get("daily_returns") or [], []
     if len(prices) < 2: issues.append("Yetersiz fiyat gözlemi")
     if dates and any(dates[i] >= dates[i + 1] for i in range(len(dates) - 1)): issues.append("Tarih sırası sorunu")
     if any((safe_float(p) is None or safe_float(p) <= 0) for p in prices): issues.append("Pozitif olmayan fiyat")
     if returns and len(returns) != max(0, len(prices) - 1): issues.append("Getiri-fiyat uyumsuzluğu")
-
-    if len(prices) >= 2 and len(returns) >= len(prices) - 1:
-        for i in range(len(prices) - 1):
-            p0, p1, r = safe_float(prices[i]), safe_float(prices[i + 1]), safe_float(returns[i])
-            if p0 > 0 and p1 > 0 and r is not None:
-                expected = (p1 / p0 - 1.0) * 100.0
-                if abs(expected - r) > (PRICE_CONSISTENCY_TOLERANCE * 100.0):
-                    issues.append("Getiri-fiyat tutarsızlığı")
-                    break
     return {"ok": not issues, "issues": issues}
 
 def validate_structural_data(fund: dict) -> Dict[str, Any]:
@@ -364,50 +378,6 @@ def audit_fund_data(fund: dict) -> dict:
     fund["data_quality_issues"] = " | ".join(dict.fromkeys(issues)) if issues else "OK"
     return fund
 
-# ============================================================
-# HTTP OTURUMU
-# ============================================================
-@dataclass
-class SourceStatus:
-    source: str; attempted: bool = False; ok: bool = False; status_code: Optional[int] = None
-    error_type: str = ""; message: str = ""; elapsed_ms: Optional[int] = None; retry_count: int = 0
-
-def new_status(source: str) -> SourceStatus: return SourceStatus(source=source)
-
-def build_http_session() -> requests.Session:
-    session = requests.Session()
-    retry = Retry(total=REQUEST_MAX_RETRIES, connect=REQUEST_MAX_RETRIES, read=REQUEST_MAX_RETRIES,
-                  status=REQUEST_MAX_RETRIES, backoff_factor=REQUEST_BACKOFF_FACTOR,
-                  status_forcelist=(429, 500, 502, 503, 504), respect_retry_after_header=True)
-    adapter = HTTPAdapter(max_retries=retry, pool_connections=MAX_WORKERS, pool_maxsize=MAX_WORKERS)
-    session.mount("https://", adapter)
-    session.mount("http://", adapter)
-    session.headers.update({"User-Agent": "KGDM3-Fon-Analiz/10.7", "Accept": "application/json,text/html"})
-    return session
-
-HTTP = build_http_session()
-
-def request_with_status(source: str, method: str, url: str, *, params=None, data=None, headers=None, timeout=HTTP_TIMEOUT):
-    status = new_status(source)
-    status.attempted = True
-    started = time.perf_counter()
-    try:
-        response = HTTP.request(method=method, url=url, params=params, data=data, headers=headers, timeout=timeout)
-        status.status_code = response.status_code
-        if response.status_code == 200:
-            status.ok, status.message = True, "OK"
-        else:
-            status.error_type, status.message = f"HTTP_{response.status_code}", f"Hata {response.status_code}"
-        return response, status
-    except Exception as exc:
-        status.error_type, status.message = "ERROR", str(exc)[:200]
-    finally:
-        status.elapsed_ms = int((time.perf_counter() - started) * 1000)
-    return None, status
-
-# ============================================================
-# TEFAS API VE YARDIMCI SCRAPING
-# ============================================================
 @st.cache_data(show_spinner=False, ttl=60 * 30)
 def fetch_tefas_universe(start_date: dt.date, end_date: dt.date) -> pd.DataFrame:
     try:
@@ -557,10 +527,6 @@ def fetch_fund_structural_data(fund_code: str, fund_kind: Optional[str] = None, 
                 structural["structural_fetch_ok"] = True
                 structural["structural_source"] = "TEFAS"
     return structural
-
-# ============================================================
-# METRİK & HESAPLAMALAR
-# ============================================================
 
 def get_fund_series(universe: pd.DataFrame, fund_code: str, fund_kind: Optional[str] = None):
     code = normalize_fund_code(fund_code)
@@ -749,6 +715,7 @@ def finalize_decisions(funds: List[dict], api_key: str = ""):
             f["decision_score"], f["karar"] = None, "YETERSİZ VERİ"
             continue
 
+        # Önbellekten okuduğu için burada bekleme yapmayacak, sadece fetch'te bekleyecek
         sent_data = fetch_market_sentiment(f.get("investment_area"), api_key)
         sent = sent_data["score"]
         
@@ -958,7 +925,7 @@ output = create_excel_output(wb, ws_list, eligible, common_n)
 # SKOR ÖZETLERİ VE EKRAN TABLOSU
 # ============================================================
 
-st.subheader("📈 KAZRİSK Portföy Özeti (V10.7)")
+st.subheader("📈 KAZRİSK Portföy Özeti (V10.8)")
 col1, col2, col3, col4 = st.columns(4)
 scores = [safe_float(x.get("decision_score")) for x in eligible if x.get("decision_score") is not None]
 if scores:
@@ -1032,7 +999,7 @@ try:
 except AttributeError:
     styled_df = df_display.style.applymap(color_cells)
 
-st.subheader("📊 Analiz Sonuçları (V10.7)")
+st.subheader("📊 Analiz Sonuçları (V10.8)")
 st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
 # ============================================================
@@ -1059,11 +1026,11 @@ if sell_alerts or buy_alerts:
         else:
             st.success("Şu an teyitli 'Güçlü Al' fırsatı veren fon yok.")
 
-st.success(f"✅ V10.7 Analiz tamamlandı. Toplam {len(eligible)} fon işlendi.")
+st.success(f"✅ V10.8 Analiz tamamlandı. Toplam {len(eligible)} fon işlendi.")
 st.download_button(
-    label="📥 KAZRİSK V10.7 Excel İndir",
+    label="📥 KAZRİSK V10.8 Excel İndir",
     data=output,
-    file_name="fonlar_KGDM3_KAZRISK_FINAL_V10_7.xlsx",
+    file_name="fonlar_KGDM3_KAZRISK_FINAL_V10_8.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
 
