@@ -32,7 +32,7 @@ def new_init(self, *args, **kwargs):
 PatternFill.__init__ = new_init
 
 # ============================================================
-# KGDM-3 & KAZRİSK - SÜRÜM V10.8 (TRAFİK SIKIŞIKLIĞI ÇÖZÜMÜ)
+# KGDM-3 & KAZRİSK - SÜRÜM V10.9 (RATE LIMIT KESİN ÇÖZÜM)
 # ============================================================
 
 st.set_page_config(
@@ -43,7 +43,7 @@ st.set_page_config(
 
 st.title("📊 KGDM-3 & KAZRİSK Hibrit Fon Analizi")
 st.caption(
-    "TEFAS + İş Yatırım | Gemini Canlı Sentiment (Dirençli REST) | V10.8"
+    "TEFAS + İş Yatırım | Gemini Canlı Sentiment (Akıllı Soğuma) + Baseline | V10.9"
 )
 
 # ============================================================
@@ -67,7 +67,7 @@ MIN_REFERENCE_SAMPLE = 5
 OVERHEAT_Z_THRESHOLD = 2.0
 OVERHEAT_PENALTY = 6.0
 
-APP_VERSION = "10.8.0"
+APP_VERSION = "10.9.0"
 
 GITHUB_OWNER = "tlgssk"
 GITHUB_REPO = "kgdm3-fon-analiz"
@@ -97,7 +97,7 @@ POSITIVE_INVESTOR_FLOW_BONUS = 3.0
 EMA_DECAY = 0.65
 
 # ============================================================
-# HTTP OTURUMU (Google API de burayı kullanacak)
+# HTTP OTURUMU (TEFAS API İÇİN)
 # ============================================================
 @dataclass
 class SourceStatus:
@@ -113,7 +113,7 @@ def build_http_session() -> requests.Session:
     adapter = HTTPAdapter(max_retries=retry, pool_connections=10, pool_maxsize=10)
     session.mount("https://", adapter)
     session.mount("http://", adapter)
-    session.headers.update({"User-Agent": "KGDM3-Fon-Analiz/10.8", "Accept": "application/json,text/html"})
+    session.headers.update({"User-Agent": "KGDM3-Fon-Analiz/10.9", "Accept": "application/json,text/html"})
     return session
 
 HTTP = build_http_session()
@@ -161,7 +161,7 @@ api_key_input = st.sidebar.text_input(
 
 ENABLE_FILTERS = st.sidebar.checkbox("Filtreleri Etkinleştir", value=False)
 
-with st.sidebar.expander("⚖️ Skor Ağırlıkları (V10.8)"):
+with st.sidebar.expander("⚖️ Skor Ağırlıkları (V10.9)"):
     w_return = st.slider("Getiri ağırlığı", 0.0, 1.0, DEFAULT_MOMENTUM_WEIGHTS["return"], 0.05)
     w_sharpe = st.slider("Sharpe ağırlığı", 0.0, 1.0, DEFAULT_MOMENTUM_WEIGHTS["sharpe"], 0.05)
     w_cumulative = st.slider("Kümülatif ağırlığı", 0.0, 1.0, DEFAULT_MOMENTUM_WEIGHTS["cumulative"], 0.05)
@@ -192,7 +192,7 @@ SHOW_DIAGNOSTICS = st.sidebar.checkbox("Kaynak tanılama bilgisini göster", val
 
 
 # ============================================================
-# CANLI GEMINI DUYARLILIK MOTORU - V10.8 (DİRENÇLİ YAPI)
+# CANLI GEMINI DUYARLILIK MOTORU - V10.9 (AKILLI SOĞUMA EKLENDİ)
 # ============================================================
 
 def clamp(value, low, high): return max(low, min(high, value))
@@ -241,18 +241,20 @@ Sadece JSON formatında çıktı ver:
         "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json"}
     }
     
-    # 3 Kez Yeniden Deneme (Retry) Mantığı
+    # 5 Kez Yeniden Deneme (Exponential Backoff) Mantığı
     last_err = ""
-    for attempt in range(3):
+    for attempt in range(5):
         try:
-            # GÜNCELLEME: requests.post yerine kendi dirençli HTTP havuzumuzu kullanıyoruz
-            response = HTTP.post(url, headers=headers, json=payload, timeout=15)
+            # Standart requests kullanarak bağlantı havuzu çökmelerini önlüyoruz
+            response = requests.post(url, headers=headers, json=payload, timeout=20)
             
             if response.status_code == 200:
                 data = response.json()
                 raw_text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "{}")
-                
                 parsed_data = json.loads(raw_text.strip("```json\n").strip("```").strip())
+                
+                # V10.9 DÜZELTMESİ: 15 İstek/Dakika sınırını aşmamak için BAŞARILI çağrıdan sonra 4.5 saniye bekle
+                time.sleep(4.5)
                 
                 return {
                     "score": int(clamp(safe_float(parsed_data.get("score", 50)), 0.0, 100.0)),
@@ -261,23 +263,24 @@ Sadece JSON formatında çıktı ver:
                     "ai_reason": "Bağlantı Başarılı"
                 }
             elif response.status_code == 429:
-                last_err = "429 Rate Limit"
-                time.sleep(2) # Limit aşımı, 2 saniye bekle
+                last_err = "429 Kotası Aşıldı"
+                # Sınır aşılırsa üstel olarak bekle: 5, 8, 11, 14 saniye...
+                time.sleep(5 + (attempt * 3))
                 continue
             else:
                 try: err_msg = response.json().get("error", {}).get("message", "")
                 except: err_msg = response.text[:50]
                 last_err = f"HTTP {response.status_code}: {err_msg}"
-                time.sleep(1)
+                time.sleep(2)
         except Exception as exc:
             last_err = f"Bağlantı Koptu: {str(exc)[:40]}"
-            time.sleep(1.5) # Ağ hatasında bekle ve tekrar dene
+            time.sleep(3) # Ağ hatasında bekle ve tekrar dene
 
     return {
         "score": 50, 
         "label": "Nötr", 
         "ai_active": False, 
-        "ai_reason": f"API Hatası (3 Deneme): {last_err}"
+        "ai_reason": f"API Hatası (5 Deneme): {last_err}"
     }
 
 
@@ -715,7 +718,6 @@ def finalize_decisions(funds: List[dict], api_key: str = ""):
             f["decision_score"], f["karar"] = None, "YETERSİZ VERİ"
             continue
 
-        # Önbellekten okuduğu için burada bekleme yapmayacak, sadece fetch'te bekleyecek
         sent_data = fetch_market_sentiment(f.get("investment_area"), api_key)
         sent = sent_data["score"]
         
@@ -925,7 +927,7 @@ output = create_excel_output(wb, ws_list, eligible, common_n)
 # SKOR ÖZETLERİ VE EKRAN TABLOSU
 # ============================================================
 
-st.subheader("📈 KAZRİSK Portföy Özeti (V10.8)")
+st.subheader("📈 KAZRİSK Portföy Özeti (V10.9)")
 col1, col2, col3, col4 = st.columns(4)
 scores = [safe_float(x.get("decision_score")) for x in eligible if x.get("decision_score") is not None]
 if scores:
@@ -999,7 +1001,7 @@ try:
 except AttributeError:
     styled_df = df_display.style.applymap(color_cells)
 
-st.subheader("📊 Analiz Sonuçları (V10.8)")
+st.subheader("📊 Analiz Sonuçları (V10.9)")
 st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
 # ============================================================
@@ -1026,11 +1028,11 @@ if sell_alerts or buy_alerts:
         else:
             st.success("Şu an teyitli 'Güçlü Al' fırsatı veren fon yok.")
 
-st.success(f"✅ V10.8 Analiz tamamlandı. Toplam {len(eligible)} fon işlendi.")
+st.success(f"✅ V10.9 Analiz tamamlandı. Toplam {len(eligible)} fon işlendi.")
 st.download_button(
-    label="📥 KAZRİSK V10.8 Excel İndir",
+    label="📥 KAZRİSK V10.9 Excel İndir",
     data=output,
-    file_name="fonlar_KGDM3_KAZRISK_FINAL_V10_8.xlsx",
+    file_name="fonlar_KGDM3_KAZRISK_FINAL_V10_9.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
 
