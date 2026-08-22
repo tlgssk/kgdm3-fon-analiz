@@ -20,13 +20,14 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 # ============================================================
-# KGDM-3 & KAZRİSK - SÜRÜM V9.1
+# KGDM-3 & KAZRİSK - SÜRÜM V9.1 (NİHAİ)
 # ============================================================
 # - V8.3'ün istikrarlı kaynak izleme ve TEFAS yapısı korundu.
 # - V9.0'ın "Veri Kalitesi + Matematiksel Tutarlılık Denetimi" eklendi.
-# - Excel raporunda dinamik Karar/Skor ısı haritası ve % formatları düzeltildi.
 # - Sütunlardaki tarihler D Sütununda BUGÜN Karar Skoru olacak şekilde 
 #   Yeniden-Eskiye (Bugün -> Dün -> Önceki Gün) doğru sıralandı.
+# - Web Arayüzünde SATIŞ (🚨) ve ALIM (🚀) alarmları yan yana ayrıldı.
+# - Excel formatlarındaki % hataları ve dinamik renkler düzeltildi.
 # ============================================================
 
 st.set_page_config(
@@ -67,139 +68,74 @@ APP_VERSION = "9.1.0"
 GITHUB_OWNER = "tlgssk"
 GITHUB_REPO = "kgdm3-fon-analiz"
 GITHUB_BRANCH = "main"
-GITHUB_FALLBACK_URL = (
-    "https://github.com/tlgssk/kgdm3-fon-analiz/"
-    "raw/refs/heads/main/"
-    "Menkul_Kiymet_Yatirim_Fonlari_EXCEL_Tum_Veri_2026-08-14.xlsx"
-)
+GITHUB_FALLBACK_URL = "https://github.com/tlgssk/kgdm3-fon-analiz/raw/refs/heads/main/Menkul_Kiymet_Yatirim_Fonlari_EXCEL_Tum_Veri_2026-08-14.xlsx"
 
-DEFAULT_MOMENTUM_WEIGHTS = {
-    "return": 0.30,
-    "sharpe": 0.25,
-    "cumulative": 0.25,
-    "drawdown": 0.20,
-}
-
-SECURITY_WEIGHTS = {
-    "aum": 0.30,
-    "investor": 0.25,
-    "concentration": 0.25,
-    "liquidity": 0.20,
-}
-
-SECURITY_SCALE = {
-    "aum": 20.0,
-    "investor": 20.0,
-    "aum_flow": 8.0,          
-    "investor_change": 6.0,
-    "concentration": 20.0,
-}
+DEFAULT_MOMENTUM_WEIGHTS = {"return": 0.30, "sharpe": 0.25, "cumulative": 0.25, "drawdown": 0.20}
+SECURITY_WEIGHTS = {"aum": 0.30, "investor": 0.25, "concentration": 0.25, "liquidity": 0.20}
+SECURITY_SCALE = {"aum": 20.0, "investor": 20.0, "aum_flow": 8.0, "investor_change": 6.0, "concentration": 20.0}
 
 DEFAULT_HYBRID_MOMENTUM_WEIGHT = 0.60
 Z_LIMIT = 2.5
-
 STRONG_BUY = 75
 WATCH_LIST = 50
 CORRECTION = 35
 
 MAX_VALOR_PENALTY = 8.0
 MAX_CONCENTRATION_PENALTY = 20.0
-
 BIST30_BONUS = 5.0
 HIGH_LIQUIDITY_BONUS = 5.0
 LOW_LIQUIDITY_PENALTY = 3.0
 POSITIVE_INVESTOR_FLOW_BONUS = 3.0
-
 EMA_DECAY = 0.65
 
 # ============================================================
-# V9.1 VERİ KALİTESİ + MATEMATİKSEL TUTARLILIK DENETİMİ
+# VERİ KALİTESİ + MATEMATİKSEL TUTARLILIK DENETİMİ
 # ============================================================
 
-DATA_QUALITY_MIN_SCORE = 55
 PRICE_CONSISTENCY_TOLERANCE = 0.0005
-STRUCTURAL_SUM_MIN = 95.0
-STRUCTURAL_SUM_MAX = 105.0
 
-def calculate_hhi(weights: List[float]) -> Optional[float]:
-    vals = [safe_float(x) for x in (weights or [])]
-    vals = [x for x in vals if x is not None and x >= 0]
-    if not vals:
-        return None
-    total = sum(vals)
-    if total <= 0:
-        return None
-    shares = [x / total for x in vals]
-    return sum(x * x for x in shares)
+def safe_float(value, default=0.0):
+    try:
+        if value is None: return default
+        n = float(value)
+        return default if pd.isna(n) else n
+    except Exception: return default
 
 def validate_price_series(fund: dict) -> Dict[str, Any]:
-    dates = fund.get("dates") or []
-    prices = fund.get("prices") or []
-    returns = fund.get("daily_returns") or []
-    issues = []
-
-    if len(prices) < 2:
-        issues.append("Yetersiz fiyat gözlemi")
-    if dates and any(dates[i] >= dates[i + 1] for i in range(len(dates) - 1)):
-        issues.append("Tarih sırası/tekillik sorunu")
-    if any((safe_float(p) is None or safe_float(p) <= 0) for p in prices):
-        issues.append("Pozitif olmayan fiyat")
-    if returns and len(returns) != max(0, len(prices) - 1):
-        issues.append("Getiri-fiyat uzunluk uyumsuzluğu")
+    dates, prices, returns, issues = fund.get("dates") or [], fund.get("prices") or [], fund.get("daily_returns") or [], []
+    if len(prices) < 2: issues.append("Yetersiz fiyat gözlemi")
+    if dates and any(dates[i] >= dates[i + 1] for i in range(len(dates) - 1)): issues.append("Tarih sırası sorunu")
+    if any((safe_float(p) is None or safe_float(p) <= 0) for p in prices): issues.append("Pozitif olmayan fiyat")
+    if returns and len(returns) != max(0, len(prices) - 1): issues.append("Getiri-fiyat uyumsuzluğu")
 
     if len(prices) >= 2 and len(returns) >= len(prices) - 1:
         for i in range(len(prices) - 1):
-            p0 = safe_float(prices[i])
-            p1 = safe_float(prices[i + 1])
-            r = safe_float(returns[i])
-            if p0 is None or p1 is None or r is None:
-                continue
-            expected = p1 / p0 - 1.0
-            if abs(expected - r) > PRICE_CONSISTENCY_TOLERANCE:
-                issues.append("Getiri-fiyat tutarsızlığı")
-                break
-
-    return {
-        "ok": not issues,
-        "issues": issues,
-        "n_dates": len(dates),
-        "n_prices": len(prices),
-        "n_returns": len(returns),
-    }
+            p0, p1, r = safe_float(prices[i]), safe_float(prices[i + 1]), safe_float(returns[i])
+            if p0 and p1 and r is not None:
+                if abs((p1 / p0 - 1.0) - r) > PRICE_CONSISTENCY_TOLERANCE:
+                    issues.append("Getiri-fiyat tutarsızlığı")
+                    break
+    return {"ok": not issues, "issues": issues}
 
 def validate_structural_data(fund: dict) -> Dict[str, Any]:
     issues = []
     top_weight = fund.get("top_asset_weight")
     weights = [safe_float(top_weight)] if top_weight else []
-    hhi = fund.get("asset_class_hhi")
-    
-    if fund.get("structural_fetch_ok") and not weights:
-        issues.append("Yapısal kaynak başarılı fakat dağılım kalemi yok")
-
-    return {
-        "ok": not issues,
-        "issues": issues,
-        "distribution_count": len(weights),
-        "distribution_sum": sum(weights) if weights else None,
-        "hhi": hhi,
-    }
+    if fund.get("structural_fetch_ok") and not weights: issues.append("Yapısal kaynak başarılı fakat dağılım yok")
+    return {"ok": not issues, "issues": issues, "hhi": fund.get("asset_class_hhi")}
 
 def audit_fund_data(fund: dict) -> dict:
-    price = validate_price_series(fund)
-    structural = validate_structural_data(fund)
-
+    price, structural = validate_price_series(fund), validate_structural_data(fund)
     score = 100.0
-    score -= 20 if not price["ok"] else 0
-    score -= 15 if fund.get("n_days", 0) < TARGET_TRADING_DAYS else 0
-    score -= 15 if not fund.get("structural_fetch_ok", False) else 0
-    score -= 10 if fund.get("aum") is None and fund.get("investors") is None else 0
-    score -= 10 if "Liste-bağıl" in str(fund.get("reference_scope", "")) else 0
+    if not price["ok"]: score -= 20
+    if fund.get("n_days", 0) < TARGET_TRADING_DAYS: score -= 15
+    if not fund.get("structural_fetch_ok", False): score -= 15
+    if fund.get("aum") is None and fund.get("investors") is None: score -= 10
+    if "Liste-bağıl" in str(fund.get("reference_scope", "")): score -= 10
 
     issues = price["issues"] + structural["issues"]
-    if not fund.get("source"):
-        issues.append("Fiyat kaynağı yok")
-    if fund.get("structural_error"):
-        issues.append(str(fund.get("structural_error")))
+    if not fund.get("source"): issues.append("Fiyat kaynağı yok")
+    if fund.get("structural_error"): issues.append(str(fund.get("structural_error")))
 
     fund["price_data_audit"] = price
     fund["structural_data_audit"] = structural
@@ -212,14 +148,8 @@ def audit_fund_data(fund: dict) -> dict:
 # RENKLER & SIDEBAR
 # ============================================================
 
-COLOR_NAVY = "1F4E79"
-COLOR_GREEN = "008000"
-COLOR_RED = "FF0000"
-COLOR_YELLOW = "B8860B"
-COLOR_WHITE = "FFFFFF"
-COLOR_LIGHT_GREEN = "E2F0D9"
-COLOR_LIGHT_YELLOW = "FFF2CC"
-COLOR_LIGHT_RED = "FCE4D6"
+COLOR_NAVY, COLOR_GREEN, COLOR_RED, COLOR_YELLOW, COLOR_WHITE = "1F4E79", "008000", "FF0000", "B8860B", "FFFFFF"
+COLOR_LIGHT_GREEN, COLOR_LIGHT_YELLOW, COLOR_LIGHT_RED = "E2F0D9", "FFF2CC", "FCE4D6"
 
 st.sidebar.header("⚙️ Analiz & Filtre Kriterleri")
 ENABLE_FILTERS = st.sidebar.checkbox("Filtreleri Etkinleştir", value=False)
@@ -234,13 +164,11 @@ with st.sidebar.expander("⚖️ Skor Ağırlıkları"):
     
     total = w_return + w_sharpe + w_cum + w_dd
     total = 1.0 if total <= 0 else total
-    
     MOMENTUM_WEIGHTS = {"return": w_return/total, "sharpe": w_sharpe/total, "cumulative": w_cum/total, "drawdown": w_dd/total}
     HYBRID_MOMENTUM_WEIGHT = st.slider("Momentum Ağırlığı", 0.0, 1.0, DEFAULT_HYBRID_MOMENTUM_WEIGHT, 0.05)
     HYBRID_SECURITY_WEIGHT = 1.0 - HYBRID_MOMENTUM_WEIGHT
 
-with st.sidebar.expander("🔧 Tanılama"):
-    SHOW_DIAGNOSTICS = st.checkbox("Kaynak tanılama bilgisini göster", value=True)
+SHOW_DIAGNOSTICS = st.sidebar.checkbox("Kaynak tanılama bilgisini göster", value=True)
 
 # ============================================================
 # HTTP OTURUMU & YARDIMCI FONKSİYONLAR
@@ -248,14 +176,8 @@ with st.sidebar.expander("🔧 Tanılama"):
 
 @dataclass
 class SourceStatus:
-    source: str
-    attempted: bool = False
-    ok: bool = False
-    status_code: Optional[int] = None
-    error_type: str = ""
-    message: str = ""
-    elapsed_ms: Optional[int] = None
-    retry_count: int = 0
+    source: str; attempted: bool = False; ok: bool = False; status_code: Optional[int] = None
+    error_type: str = ""; message: str = ""; elapsed_ms: Optional[int] = None; retry_count: int = 0
 
 def new_status(source: str) -> SourceStatus: return SourceStatus(source=source)
 
@@ -289,13 +211,6 @@ def request_with_status(source: str, method: str, url: str, *, params=None, data
     finally:
         status.elapsed_ms = int((time.perf_counter() - started) * 1000)
     return None, status
-
-def safe_float(value, default=0.0):
-    try:
-        if value is None: return default
-        n = float(value)
-        return default if pd.isna(n) else n
-    except Exception: return default
 
 def parse_number(value):
     if value is None or isinstance(value, bool): return None
@@ -565,7 +480,6 @@ def calculate_security_scores(funds: List[dict]):
         inv_z = zscore([f.get("investors") for f in subset])
         flow_z = zscore([f.get("aum_flow_proxy") for f in subset])
         inv_c_z = zscore([f.get("inv_change") for f in subset])
-        conc_z = zscore([f.get("top_asset_weight") for f in subset])
         
         for local_i, fund_idx in enumerate(indices):
             f = funds[fund_idx]
@@ -736,19 +650,18 @@ def create_excel_output(wb, ws_list, all_funds, common_n_days):
         "Haftalık Bileşik (%)", "Veri Kaynağı", "Kalite Uyarıları"
     ]
 
-    # Tarihleri "Bugün"den geriye doğru (Bugün, Dün, Önceki Gün) oluştur
+    # Tarihleri "Bugün"den geriye doğru oluştur
     today_dt = dt.date.today()
-    n_dates_to_generate = common_n_days if common_n_days > 0 else 5
-    sample_dates = [(today_dt - dt.timedelta(days=(n_dates_to_generate - 1 - i))).strftime("%d.%m") for i in range(n_dates_to_generate)]
+    n_dates = common_n_days if common_n_days > 0 else 5
+    sample_dates = [(today_dt - dt.timedelta(days=(n_dates - 1 - i))).strftime("%d.%m") for i in range(n_dates)]
     
-    # En sondan başa doğru son 5 gün (Yani 22.08, 21.08, 20.08...)
+    # En sondan başa doğru son 5 gün (Bugün -> Dün -> Önceki Gün)
     last_5_dates = list(reversed(sample_dates[-5:]))
     
     daily_headers = []
     for day in last_5_dates: 
-        # SÜTUN D -> Skor, SÜTUN E -> Karar
+        # Sütunları önce Skor sonra Karar olacak şekilde düzenledik.
         daily_headers.extend([f"{day} Karar Skoru", f"{day} Model Kararı"])
-    
     headers[3:3] = daily_headers
 
     for day in sample_dates: headers.append(f"{day} Trend Skor")
@@ -772,8 +685,7 @@ def create_excel_output(wb, ws_list, all_funds, common_n_days):
         daily_scores = (item.get("running_trend_hybrid") or [])[-5:]
         daily_scores = [None] * max(0, len(last_5_dates) - len(daily_scores)) + daily_scores
         
-        # Skorlar eski tarihten yeni tarihe doğru (18->19->...->22).
-        # Sütunları 22->21->20 diye sıraladığımız için listeyi ters çevirerek yazıyoruz.
+        # Skorlar listede Yeniden Eskiye eklenecek
         for s in reversed(daily_scores): 
             row_data.extend([s if s is not None else "", decision_label_from_score(s) if s is not None else ""])
 
@@ -802,58 +714,41 @@ def create_excel_output(wb, ws_list, all_funds, common_n_days):
         ws_scores.append(row_data)
 
     # 1. METİN RENKLENDİRME (Model Kararları)
-    green_font = Font(bold=True, color=COLOR_GREEN)
-    red_font = Font(bold=True, color=COLOR_RED)
-    yellow_font = Font(bold=True, color=COLOR_YELLOW)
-    
+    green_font, red_font, yellow_font = Font(bold=True, color=COLOR_GREEN), Font(bold=True, color=COLOR_RED), Font(bold=True, color=COLOR_YELLOW)
     decision_cols = [idx for name, idx in header_index.items() if "Karar" in name and "Skor" not in name]
 
     for row_number in range(2, ws_scores.max_row + 1):
         for col_idx in decision_cols:
-            decision_cell = ws_scores.cell(row=row_number, column=col_idx)
-            decision_text = str(decision_cell.value or "").upper()
-
-            if "GÜÇLÜ AL" in decision_text or "ASIL LİSTE" in decision_text:
-                decision_cell.font = green_font
-            elif "DÜZELTME" in decision_text:
-                decision_cell.font = yellow_font
-            elif "ACİL SAT" in decision_text or "YETERSİZ" in decision_text:
-                decision_cell.font = red_font
+            cell = ws_scores.cell(row=row_number, column=col_idx)
+            text = str(cell.value or "").upper()
+            if "GÜÇLÜ AL" in text or "ASIL LİSTE" in text: cell.font = green_font
+            elif "DÜZELTME" in text: cell.font = yellow_font
+            elif "ACİL SAT" in text or "YETERSİZ" in text: cell.font = red_font
 
     # 2. HÜCRE ARKA PLAN RENKLENDİRME (Skorlar)
     score_cols = [idx for name, idx in header_index.items() if "Skor" in name]
-
     for col_idx in score_cols:
         col_letter = get_column_letter(col_idx)
-        score_range = f"{col_letter}2:{col_letter}{ws_scores.max_row}"
-        ws_scores.conditional_formatting.add(score_range, CellIsRule(operator="greaterThanOrEqual", formula=["75"], fill=PatternFill(start_color=COLOR_LIGHT_GREEN, fill_type="solid")))
-        ws_scores.conditional_formatting.add(score_range, CellIsRule(operator="between", formula=["50", "74"], fill=PatternFill(start_color=COLOR_LIGHT_YELLOW, fill_type="solid")))
-        ws_scores.conditional_formatting.add(score_range, CellIsRule(operator="lessThan", formula=["50"], fill=PatternFill(start_color=COLOR_LIGHT_RED, fill_type="solid")))
+        rng = f"{col_letter}2:{col_letter}{ws_scores.max_row}"
+        ws_scores.conditional_formatting.add(rng, CellIsRule(operator="greaterThanOrEqual", formula=["75"], fill=PatternFill(start_color=COLOR_LIGHT_GREEN, fill_type="solid")))
+        ws_scores.conditional_formatting.add(rng, CellIsRule(operator="between", formula=["50", "74"], fill=PatternFill(start_color=COLOR_LIGHT_YELLOW, fill_type="solid")))
+        ws_scores.conditional_formatting.add(rng, CellIsRule(operator="lessThan", formula=["50"], fill=PatternFill(start_color=COLOR_LIGHT_RED, fill_type="solid")))
 
-    # Para ve Yüzde formatlamaları
-    currency_col = header_index.get("AUM (₺)")
-    integer_col = header_index.get("Yatırımcı")
-
+    # Formatlamalar
+    cur_col, int_col = header_index.get("AUM (₺)"), header_index.get("Yatırımcı")
+    pct_cols = ["Ort. Günlük Getiri (%)", "Volatilite (%)", "Kümülatif Getiri (%)", "MaxDD (%)", "En Büyük Varlık (%)", "Net Likidite (%)", "AUM Değişim (%)", "AUM Akış Proxy (%)", "Yatırımcı Değişim (%)", "Haftalık Bileşik (%)"]
+    
     for row_number in range(2, ws_scores.max_row + 1):
-        if currency_col:
-            ws_scores.cell(row=row_number, column=currency_col).number_format = '#,##0.00 "₺"'
-        if integer_col:
-            ws_scores.cell(row=row_number, column=integer_col).number_format = "#,##0"
-            
-        percent_columns = ["Ort. Günlük Getiri (%)", "Volatilite (%)", "Kümülatif Getiri (%)", "MaxDD (%)", "En Büyük Varlık (%)", "Net Likidite (%)", "AUM Değişim (%)", "AUM Akış Proxy (%)", "Yatırımcı Değişim (%)", "Haftalık Bileşik (%)"]
-        
-        for col_name in percent_columns:
-            col_idx = header_index.get(col_name)
-            if col_idx:
-                val = ws_scores.cell(row=row_number, column=col_idx).value
-                if isinstance(val, (int, float)):
-                    ws_scores.cell(row=row_number, column=col_idx).number_format = '0.00"%"'
+        if cur_col: ws_scores.cell(row=row_number, column=cur_col).number_format = '#,##0.00 "₺"'
+        if int_col: ws_scores.cell(row=row_number, column=int_col).number_format = "#,##0"
+        for col_name in pct_cols:
+            idx = header_index.get(col_name)
+            if idx and isinstance(ws_scores.cell(row=row_number, column=idx).value, (int, float)):
+                ws_scores.cell(row=row_number, column=idx).number_format = '0.00"%"'
 
     thin = Side(style="thin", color="D9E1F2")
     for row in ws_scores.iter_rows():
-        for cell in row:
-            cell.alignment = Alignment(vertical="center")
-            cell.border = Border(bottom=thin)
+        for cell in row: cell.alignment, cell.border = Alignment(vertical="center"), Border(bottom=thin)
             
     ws_scores.freeze_panes = "A2"
     ws_scores.sheet_view.showGridLines = False
@@ -864,7 +759,7 @@ def create_excel_output(wb, ws_list, all_funds, common_n_days):
     return output
 
 # ============================================================
-# ANA ARAYÜZ (STREAMLIT YÜKLEME)
+# ANA ARAYÜZ (STREAMLIT YÜKLEME VE ÇALIŞTIRMA)
 # ============================================================
 
 col_upload, col_github = st.columns(2)
@@ -923,13 +818,20 @@ with st.spinner("📊 Kalite denetimi ve skorlar hesaplanıyor..."):
 output = create_excel_output(wb, ws_list, eligible, common_n)
 
 # ============================================================
-# EKRAN TABLOSU & KAZRİSK 2 GÜN TEYİT ALARMLARI (WEB ARAYÜZÜ)
+# SKOR ÖZETLERİ VE EKRAN TABLOSU
 # ============================================================
+
+st.subheader("📈 KAZRİSK Portföy Özeti")
+col1, col2, col3, col4 = st.columns(4)
+scores = [safe_float(x.get("decision_score")) for x in eligible if x.get("decision_score") is not None]
+if scores:
+    col1.metric("En Yüksek Skor", f"{max(scores):.0f}")
+    col2.metric("Ortalama Skor", f"{sum(scores) / len(scores):.1f}")
+    col3.metric("En Düşük Skor", f"{min(scores):.0f}")
+    col4.metric("Güçlü Al Veren", sum(1 for x in eligible if x.get("karar") == "GÜÇLÜ AL"))
 
 display_rows = []
 early_alerts = []
-
-# Web için de bugün tarihli etiketler oluştur (Bugün, Dün, Önceki Gün)
 today_dt = dt.date.today()
 
 for item in eligible:
@@ -945,12 +847,9 @@ for item in eligible:
     own_scores = item.get("running_trend_hybrid") or []
     last_5_s = own_scores[-5:] if len(own_scores) >= 5 else own_scores
     
-    # Web arayüzü kolonlarını bugüne sabitle (Bugün, Dün, Önceki Gün -> 22.08, 21.08 ...)
+    # Web arayüzü kolonlarını bugüne sabitle (Bugün, Dün, Önceki Gün)
     last_5_dates_web = [(today_dt - dt.timedelta(days=i)).strftime("%d.%m") for i in range(len(last_5_s))]
 
-    # Skorlar (last_5_s) eski tarihten yeni tarihe doğrudur (18.08 -> 22.08)
-    # Tarihleri ise yenisinden eskisine yazdık (22.08 -> 18.08)
-    # Bu yüzden last_5_s listesini de ters çevirerek (reversed) eşleştiriyoruz
     for day, score in zip(last_5_dates_web, reversed(last_5_s)):
         row_dict[f"{day} Karar Skoru"] = score if score is not None else ""
         row_dict[f"{day} Model Kararı"] = decision_label_from_score(score)
@@ -970,38 +869,49 @@ for item in eligible:
         lbls = [decision_label_from_score(s) for s in last_5_s]
         if lbls[-1] == "ACİL SAT" and lbls[-2] == "ACİL SAT":
             early_alerts.append({
-                "Fon Kodu": item["code"], "Fon Adı": item.get("fund_title"), "Alan": item.get("investment_area"),
-                "KAZRİSK Durumu": "🚨 2 GÜNDÜR TEYİTLİ ACİL SAT", "Son Skor": last_5_s[-1]
+                "Tip": "SAT", "Fon Kodu": item["code"], "Fon Adı": item.get("fund_title"), "Alan": item.get("investment_area"),
+                "KAZRİSK Durumu": "🚨 2 GÜN TEYİTLİ ACİL SAT", "Son Skor": last_5_s[-1]
             })
         elif lbls[-1] == "GÜÇLÜ AL" and lbls[-2] == "GÜÇLÜ AL":
             early_alerts.append({
-                "Fon Kodu": item["code"], "Fon Adı": item.get("fund_title"), "Alan": item.get("investment_area"),
-                "KAZRİSK Durumu": "🚀 2 GÜNDÜR TEYİTLİ GÜÇLÜ AL", "Son Skor": last_5_s[-1]
+                "Tip": "AL", "Fon Kodu": item["code"], "Fon Adı": item.get("fund_title"), "Alan": item.get("investment_area"),
+                "KAZRİSK Durumu": "🚀 2 GÜN TEYİTLİ GÜÇLÜ AL", "Son Skor": last_5_s[-1]
             })
 
 df_display = pd.DataFrame(display_rows)
 
 def color_cells(value):
     text = str(value).upper()
-    if "GÜÇLÜ AL" in text or "ASIL LİSTE" in text or "🟢" in text or "DENGELİ" in text: 
-        return "color: #008000; font-weight: bold;"
-    if "DÜZELTME" in text or "🟡" in text or "ORTA KONSANTRASYON" in text: 
-        return "color: #B8860B; font-weight: bold;"
-    if "ACİL SAT" in text or "YETERSİZ" in text or "🔴" in text or "YÜKSEK KONSANTRASYON" in text: 
-        return "color: #FF0000; font-weight: bold;"
+    if "GÜÇLÜ AL" in text or "ASIL LİSTE" in text or "🟢" in text or "DENGELİ" in text: return "color: #008000; font-weight: bold;"
+    if "DÜZELTME" in text or "🟡" in text or "ORTA KONSANTRASYON" in text: return "color: #B8860B; font-weight: bold;"
+    if "ACİL SAT" in text or "YETERSİZ" in text or "🔴" in text or "YÜKSEK KONSANTRASYON" in text: return "color: #FF0000; font-weight: bold;"
     return ""
 
-try: 
-    styled_df = df_display.style.map(color_cells)
-except AttributeError: 
-    styled_df = df_display.style.applymap(color_cells)
+try: styled_df = df_display.style.map(color_cells)
+except AttributeError: styled_df = df_display.style.applymap(color_cells)
 
 st.subheader("📊 Analiz Sonuçları (V9.1)")
 st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
-if early_alerts:
-    st.subheader("🚨 KAZRİSK® 2 Günlük Teyitli Alarmlar")
-    st.dataframe(pd.DataFrame(early_alerts), use_container_width=True, hide_index=True)
+# ============================================================
+# ALARM TABLOLARI (SATIŞ VE ALIM YAN YANA)
+# ============================================================
+sell_alerts = [{k:v for k,v in a.items() if k != "Tip"} for a in early_alerts if a["Tip"] == "SAT"]
+buy_alerts = [{k:v for k,v in a.items() if k != "Tip"} for a in early_alerts if a["Tip"] == "AL"]
+
+if sell_alerts or buy_alerts:
+    st.subheader("🚨/🚀 KAZRİSK® 2 Günlük Teyitli Alarmlar")
+    col_alert1, col_alert2 = st.columns(2)
+
+    with col_alert1:
+        st.markdown("### 🚨 Satış Alarmları")
+        if sell_alerts: st.dataframe(pd.DataFrame(sell_alerts), use_container_width=True, hide_index=True)
+        else: st.info("Şu an teyitli 'Acil Sat' sinyali veren fon yok.")
+
+    with col_alert2:
+        st.markdown("### 🚀 Fırsat Alarmları")
+        if buy_alerts: st.dataframe(pd.DataFrame(buy_alerts), use_container_width=True, hide_index=True)
+        else: st.success("Şu an teyitli 'Güçlü Al' fırsatı veren fon yok.")
 
 st.success(f"✅ V9.1 Analiz tamamlandı. Toplam {len(eligible)} fon işlendi.")
 st.download_button(
@@ -1017,14 +927,9 @@ if SHOW_DIAGNOSTICS:
     for item in eligible:
         for status in item.get("source_statuses", []):
             diagnostic_rows.append({
-                "Fon": item["code"],
-                "Kaynak": status.get("source"),
-                "Denendi": "Evet" if status.get("attempted") else "Hayır",
-                "Başarılı": "Evet" if status.get("ok") else "Hayır",
-                "HTTP": status.get("status_code"),
-                "Hata": status.get("error_type"),
-                "Mesaj": status.get("message"),
-                "Süre ms": status.get("elapsed_ms"),
+                "Fon": item["code"], "Kaynak": status.get("source"), "Denendi": "Evet" if status.get("attempted") else "Hayır",
+                "Başarılı": "Evet" if status.get("ok") else "Hayır", "HTTP": status.get("status_code"),
+                "Hata": status.get("error_type"), "Mesaj": status.get("message"), "Süre ms": status.get("elapsed_ms")
             })
     if diagnostic_rows:
         st.dataframe(pd.DataFrame(diagnostic_rows), use_container_width=True, hide_index=True)
