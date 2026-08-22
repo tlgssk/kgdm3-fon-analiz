@@ -905,4 +905,203 @@ with col_upload:
     uploaded_file = st.file_uploader("Bilgisayardan Excel Yükle", type=["xlsx"])
     if uploaded_file is not None:
         try: wb = openpyxl.load_workbook(uploaded_file)
-        except Exception as exc: st.
+        except Exception as exc: st.error(f"Excel yükleme hatası: {exc}")
+
+with col_github:
+    if st.button("🚀 GitHub'dan Çek ve Analiz Et", use_container_width=True):
+        url = GITHUB_FALLBACK_URL
+        res, stat = request_with_status("GitHub", "GET", url)
+        if res and stat.ok:
+            wb = openpyxl.load_workbook(io.BytesIO(res.content))
+            st.success("✅ Veri çekildi.")
+
+if wb is None: st.stop()
+
+ws_list = wb["Fon_Listesi"] if "Fon_Listesi" in wb.sheetnames else wb.active
+req_codes = [normalize_fund_code(r[0].value) for r in ws_list.iter_rows(min_row=2) if r and r[0].value]
+req_codes = list(dict.fromkeys(filter(None, req_codes)))
+
+if not req_codes: st.stop()
+
+with st.spinner("🔄 TEFAS verileri alınıyor..."):
+    today = dt.date.today()
+    universe = fetch_tefas_universe(today - dt.timedelta(days=LOOKBACK_CALENDAR_DAYS), today)
+    meta_map = build_fund_meta_map(universe)
+    ref = build_universe_reference(universe, TARGET_TRADING_DAYS)
+
+calc_funds, failed = [], []
+prog = st.progress(0, "Analiz ediliyor...")
+with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as exe:
+    futs = {exe.submit(fetch_and_compute_one_fund, c, universe, meta_map, {}): c for c in req_codes}
+    for i, fut in enumerate(concurrent.futures.as_completed(futs)):
+        c = futs[fut]
+        try: _, met, src = fut.result()
+        except Exception: met = None
+        if met: calc_funds.append(met)
+        else: failed.append(c)
+        prog.progress((i + 1) / len(req_codes))
+prog.empty()
+
+eligible = [f for f in calc_funds if f.get("n_days", 0) >= MIN_ROLLING_DAYS]
+
+with st.spinner("📊 V10 Modeli (Gemini Canlı Sentiment + Baseline) Hesaplanıyor..."):
+    for f in eligible: audit_fund_data(f)
+    calculate_security_scores(eligible, ref)
+    calculate_market_relative_momentum(eligible, ref, TARGET_TRADING_DAYS)
+    common_n = calculate_trend_scores(eligible, api_key_input)
+    finalize_decisions(eligible, api_key_input)
+
+output = create_excel_output(wb, ws_list, eligible, common_n)
+
+# ============================================================
+# SKOR ÖZETLERİ VE EKRAN TABLOSU
+# ============================================================
+
+st.subheader("📈 KAZRİSK Portföy Özeti (V10.3)")
+col1, col2, col3, col4 = st.columns(4)
+scores = [safe_float(x.get("decision_score")) for x in eligible if x.get("decision_score") is not None]
+if scores:
+    col1.metric("En Yüksek Skor", f"{max(scores):.0f}")
+    col2.metric("Ortalama Skor", f"{sum(scores) / len(scores):.1f}")
+    col3.metric("En Düşük Skor", f"{min(scores):.0f}")
+    col4.metric("Güçlü Al Veren", sum(1 for x in eligible if x.get("karar") == "GÜÇLÜ AL"))
+
+display_rows = []
+early_alerts = []
+today_dt = dt.date.today()
+
+for item in eligible:
+    top_asset = item.get("top_asset_weight")
+    risk_label = "⚪ Veri Yok" if top_asset is None else ("⚠️ Yüksek Konsantrasyon" if top_asset > 30 else ("🟡 Orta Konsantrasyon" if top_asset > 15 else "🛡️ Dengeli"))
+
+    row_dict = {
+        "Fon Kodu": item["code"],
+        "Fon Adı": item.get("fund_title") or "-",
+        "Yatırım Alanı": item.get("investment_area") or "-",
+    }
+
+    own_scores = item.get("running_trend_hybrid") or []
+    last_5_s = own_scores[-5:] if len(own_scores) >= 5 else own_scores
+    last_5_dates_web = [(today_dt - dt.timedelta(days=i)).strftime("%d.%m") for i in range(len(last_5_s))]
+
+    for day, score in zip(last_5_dates_web, reversed(last_5_s)):
+        row_dict[f"{day} Karar Skoru"] = score if score is not None else ""
+        row_dict[f"{day} Model Kararı"] = decision_label_from_score(score)
+
+    row_dict.update({
+        "Sentiment Skoru": item.get("sentiment_score"),
+        "Duyarlılık Yönü": item.get("sentiment_label"),
+        "Güncel Karar Skoru": item.get("decision_score"),
+        "Trend Skoru": item.get("trend_skor"),
+        "Güncel Karar": item.get("karar"),
+        "Net Likidite (%)": f"%{safe_float(item.get('emergency_cash_ratio')):.2f}" if item.get("cash_ratio_known") else "Veri Yok",
+        "KAZRİSK Konsantrasyon": risk_label,
+        "Haftalık Getiri (%)": round(safe_float(item.get("weekly_return")), 2),
+        "Veri Kalite Skoru": item.get("data_quality_score"),
+    })
+    display_rows.append(row_dict)
+
+    if len(last_5_s) >= 2:
+        lbls = [decision_label_from_score(s) for s in last_5_s]
+        if lbls[-1] == "ACİL SAT" and lbls[-2] == "ACİL SAT":
+            early_alerts.append({
+                "Tip": "SAT", "Fon Kodu": item["code"], "Fon Adı": item.get("fund_title"), "Alan": item.get("investment_area"),
+                "KAZRİSK Durumu": "🚨 2 GÜN TEYİTLİ ACİL SAT", "Son Skor": last_5_s[-1]
+            })
+        elif lbls[-1] == "GÜÇLÜ AL" and lbls[-2] == "GÜÇLÜ AL":
+            early_alerts.append({
+                "Tip": "AL", "Fon Kodu": item["code"], "Fon Adı": item.get("fund_title"), "Alan": item.get("investment_area"),
+                "KAZRİSK Durumu": "🚀 2 GÜN TEYİTLİ GÜÇLÜ AL", "Son Skor": last_5_s[-1]
+            })
+
+df_display = pd.DataFrame(display_rows)
+
+def color_cells(value):
+    text = str(value).upper()
+    if "GÜÇLÜ AL" in text or "ASIL LİSTE" in text or "🟢" in text or "DENGELİ" in text:
+        return "color: #008000; font-weight: bold;"
+    if "DÜZELTME" in text or "🟡" in text or "ORTA KONSANTRASYON" in text:
+        return "color: #B8860B; font-weight: bold;"
+    if "ACİL SAT" in text or "YETERSİZ" in text or "🔴" in text or "YÜKSEK KONSANTRASYON" in text:
+        return "color: #FF0000; font-weight: bold;"
+    return ""
+
+try:
+    styled_df = df_display.style.map(color_cells)
+except AttributeError:
+    styled_df = df_display.style.applymap(color_cells)
+
+st.subheader("📊 Analiz Sonuçları (V10.3)")
+st.dataframe(styled_df, use_container_width=True, hide_index=True)
+
+# ============================================================
+# ALARM TABLOLARI (SATIŞ VE ALIM YAN YANA)
+# ============================================================
+sell_alerts = [{k: v for k, v in a.items() if k != "Tip"} for a in early_alerts if a["Tip"] == "SAT"]
+buy_alerts = [{k: v for k, v in a.items() if k != "Tip"} for a in early_alerts if a["Tip"] == "AL"]
+
+if sell_alerts or buy_alerts:
+    st.subheader("🚨/🚀 KAZRİSK® 2 Günlük Teyitli Alarmlar")
+    col_alert1, col_alert2 = st.columns(2)
+
+    with col_alert1:
+        st.markdown("### 🚨 Satış Alarmları")
+        if sell_alerts:
+            st.dataframe(pd.DataFrame(sell_alerts), use_container_width=True, hide_index=True)
+        else:
+            st.info("Şu an teyitli 'Acil Sat' sinyali veren fon yok.")
+
+    with col_alert2:
+        st.markdown("### 🚀 Fırsat Alarmları")
+        if buy_alerts:
+            st.dataframe(pd.DataFrame(buy_alerts), use_container_width=True, hide_index=True)
+        else:
+            st.success("Şu an teyitli 'Güçlü Al' fırsatı veren fon yok.")
+
+st.success(f"✅ V10.3 Analiz tamamlandı. Toplam {len(eligible)} fon işlendi.")
+st.download_button(
+    label="📥 KAZRİSK V10.3 Excel İndir",
+    data=output,
+    file_name="fonlar_KGDM3_KAZRISK_FINAL_V10_3.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+)
+
+# ============================================================
+# KAYNAK TANILAMA & AI BAYRAK TABLOSU
+# ============================================================
+if SHOW_DIAGNOSTICS:
+    st.subheader("🔎 Veri Kaynağı Tanılaması & Gemini AI Modu")
+    diagnostic_rows = []
+    for item in eligible:
+        
+        # EĞER PASİFSE SEBEBİNİ YANINA YAZDIR:
+        reason = item.get("sentiment_ai_reason", "Bilinmiyor")
+        if item.get("sentiment_ai_active"):
+            ai_status = "🟢 Aktif (Canlı API)"
+        else:
+            ai_status = f"🔴 Pasif ({reason})"
+
+        for status in item.get("source_statuses", []):
+            diagnostic_rows.append({
+                "Fon": item["code"],
+                "Kaynak": status.get("source"),
+                "Denendi": "Evet" if status.get("attempted") else "Hayır",
+                "Başarılı": "Evet" if status.get("ok") else "Hayır",
+                "HTTP": status.get("status_code"),
+                "Hata": status.get("error_type"),
+                "Süre ms": status.get("elapsed_ms"),
+                "Gemini AI Modu": ai_status
+            })
+            
+    if diagnostic_rows:
+        df_diag = pd.DataFrame(diagnostic_rows)
+        def color_ai_status(val):
+            if isinstance(val, str):
+                if "🟢 Aktif" in val: return 'color: #008000; font-weight: bold;'
+                elif "🔴 Pasif" in val: return 'color: #FF0000; font-weight: bold;'
+            return ''
+            
+        try: styled_diag = df_diag.style.map(color_ai_status)
+        except AttributeError: styled_diag = df_diag.style.applymap(color_ai_status)
+
+        st.dataframe(styled_diag, use_container_width=True, hide_index=True)
