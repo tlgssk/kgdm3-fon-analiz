@@ -686,6 +686,18 @@ def calculate_trend_scores(funds: List[dict]):
         else: f["trend_skor"] = None
     return n_days
 
+# ============================================================
+# KARAR
+# ============================================================
+
+def decision_label_from_score(score) -> str:
+    if score is None: return "YETERSİZ VERİ"
+    score = safe_float(score)
+    if score >= STRONG_BUY: return "GÜÇLÜ AL"
+    if score >= WATCH_LIST: return "ASIL LİSTE"
+    if score >= CORRECTION: return "DÜZELTME / İZLE"
+    return "ACİL SAT"
+
 def finalize_decisions(funds: List[dict]):
     for f in funds:
         mom = f.get("market_momentum")
@@ -696,10 +708,7 @@ def finalize_decisions(funds: List[dict]):
             continue
         dec = int(round(clamp(mom * HYBRID_MOMENTUM_WEIGHT + sec * HYBRID_SECURITY_WEIGHT, 0.0, 100.0)))
         f["decision_score"] = dec
-        if dec >= STRONG_BUY: f["karar"] = "GÜÇLÜ AL"
-        elif dec >= WATCH_LIST: f["karar"] = "ASIL LİSTE"
-        elif dec >= CORRECTION: f["karar"] = "DÜZELTME / İZLE"
-        else: f["karar"] = "ACİL SAT"
+        f["karar"] = decision_label_from_score(dec)
 
 def compute_confidence_label(fund: dict) -> str:
     score = calculate_confidence_score(fund) # from v9.0
