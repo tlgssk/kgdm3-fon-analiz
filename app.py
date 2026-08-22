@@ -32,7 +32,7 @@ def new_init(self, *args, **kwargs):
 PatternFill.__init__ = new_init
 
 # ============================================================
-# KGDM-3 & KAZRİSK - SÜRÜM V10.6 (MODEL GÜNCELLEMESİ)
+# KGDM-3 & KAZRİSK - SÜRÜM V10.7 (GOOGLE API 3.6 GÜNCELLEMESİ)
 # ============================================================
 
 st.set_page_config(
@@ -44,7 +44,7 @@ st.set_page_config(
 st.title("📊 KGDM-3 & KAZRİSK Hibrit Fon Analizi")
 st.caption(
     "TEFAS + TEFAS Direct API + İş Yatırım + Fintables | "
-    "Gemini Canlı Sentiment (REST API v2.5) + Evrensel Baseline | V10.6"
+    "Gemini Canlı Sentiment (REST API v3.6) + Evrensel Baseline | V10.7"
 )
 
 # ============================================================
@@ -68,7 +68,7 @@ MIN_REFERENCE_SAMPLE = 5
 OVERHEAT_Z_THRESHOLD = 2.0
 OVERHEAT_PENALTY = 6.0
 
-APP_VERSION = "10.6.0"
+APP_VERSION = "10.7.0"
 
 GITHUB_OWNER = "tlgssk"
 GITHUB_REPO = "kgdm3-fon-analiz"
@@ -124,7 +124,7 @@ ENABLE_FILTERS = st.sidebar.checkbox("Filtreleri Etkinleştir", value=False)
 TARGET_WEEKLY_RETURN = st.sidebar.slider("Hedef Haftalık Getiri (%)", -5.0, 10.0, 0.0, 0.10)
 MIN_INVESTOR_COUNT = st.sidebar.slider("Minimum Yatırımcı Sayısı", 0, 100000, 0, 500)
 
-with st.sidebar.expander("⚖️ Skor Ağırlıkları (V10.6)"):
+with st.sidebar.expander("⚖️ Skor Ağırlıkları (V10.7)"):
     w_return = st.slider("Getiri ağırlığı", 0.0, 1.0, DEFAULT_MOMENTUM_WEIGHTS["return"], 0.05)
     w_sharpe = st.slider("Sharpe ağırlığı", 0.0, 1.0, DEFAULT_MOMENTUM_WEIGHTS["sharpe"], 0.05)
     w_cumulative = st.slider("Kümülatif ağırlığı", 0.0, 1.0, DEFAULT_MOMENTUM_WEIGHTS["cumulative"], 0.05)
@@ -155,7 +155,7 @@ SHOW_DIAGNOSTICS = st.sidebar.checkbox("Kaynak tanılama bilgisini göster", val
 
 
 # ============================================================
-# CANLI GEMINI DUYARLILIK (MARKET SENTIMENT) MOTORU - V10.6
+# CANLI GEMINI DUYARLILIK (MARKET SENTIMENT) MOTORU - V10.7
 # ============================================================
 
 @st.cache_data(ttl=60 * 60 * 4, show_spinner=False)
@@ -193,8 +193,8 @@ Sadece JSON formatında çıktı ver:
 {{"score": 75, "label": "Gerekçe etiketi"}}
 """
         
-        # GÜNCELLENDİ: Güncel ve kararlı model (gemini-2.5-flash)
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key_clean}"
+        # GÜNCELLENDİ: Google API hata mesajına istinaden gemini-3.6-flash kullanılıyor
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={api_key_clean}"
         headers = {'Content-Type': 'application/json'}
         payload = {
             "contents": [
@@ -382,7 +382,7 @@ def build_http_session() -> requests.Session:
     adapter = HTTPAdapter(max_retries=retry, pool_connections=MAX_WORKERS, pool_maxsize=MAX_WORKERS)
     session.mount("https://", adapter)
     session.mount("http://", adapter)
-    session.headers.update({"User-Agent": "KGDM3-Fon-Analiz/10.6", "Accept": "application/json,text/html"})
+    session.headers.update({"User-Agent": "KGDM3-Fon-Analiz/10.7", "Accept": "application/json,text/html"})
     return session
 
 HTTP = build_http_session()
@@ -958,7 +958,7 @@ output = create_excel_output(wb, ws_list, eligible, common_n)
 # SKOR ÖZETLERİ VE EKRAN TABLOSU
 # ============================================================
 
-st.subheader("📈 KAZRİSK Portföy Özeti (V10.6)")
+st.subheader("📈 KAZRİSK Portföy Özeti (V10.7)")
 col1, col2, col3, col4 = st.columns(4)
 scores = [safe_float(x.get("decision_score")) for x in eligible if x.get("decision_score") is not None]
 if scores:
@@ -1032,7 +1032,7 @@ try:
 except AttributeError:
     styled_df = df_display.style.applymap(color_cells)
 
-st.subheader("📊 Analiz Sonuçları (V10.6)")
+st.subheader("📊 Analiz Sonuçları (V10.7)")
 st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
 # ============================================================
@@ -1059,11 +1059,11 @@ if sell_alerts or buy_alerts:
         else:
             st.success("Şu an teyitli 'Güçlü Al' fırsatı veren fon yok.")
 
-st.success(f"✅ V10.6 Analiz tamamlandı. Toplam {len(eligible)} fon işlendi.")
+st.success(f"✅ V10.7 Analiz tamamlandı. Toplam {len(eligible)} fon işlendi.")
 st.download_button(
-    label="📥 KAZRİSK V10.6 Excel İndir",
+    label="📥 KAZRİSK V10.7 Excel İndir",
     data=output,
-    file_name="fonlar_KGDM3_KAZRISK_FINAL_V10_6.xlsx",
+    file_name="fonlar_KGDM3_KAZRISK_FINAL_V10_7.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
 
