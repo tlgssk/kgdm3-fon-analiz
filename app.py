@@ -2,11 +2,10 @@ import concurrent.futures
 import datetime as dt
 import io
 import re
-import statistics
 import time
 from collections import defaultdict
 from dataclasses import dataclass, asdict
-from typing import Optional, List, Dict, Tuple, Any
+from typing import Optional, List, Dict, Tuple
 
 import openpyxl
 from openpyxl.styles.fills import PatternFill
@@ -507,7 +506,7 @@ def fetch_fund_structural_data(fund_code: str, fund_kind: Optional[str] = None, 
                 structural["top_asset_weight_basis"] = top_field
 
             # KAZRİSK KURALI: Net Likidite = (Ters Repo + Mevduat + Takasbank/BIST Para Piyasası) - REPO (Eksi Borç)
-            positive_cash_fields = ["reverse_repo_pct", "term_deposit_pct", "deposit_tl_pct", "takasbank_money_market_pct", "bpp"]
+            positive_cash_fields = ["reverse_repo_pct", "term_deposit_pct", "deposit_tl_pct", "takasbank_money_market_pct", "bist_money_market_pct"]
             positive_cash = sum(safe_float(row.get(f)) for f in positive_cash_fields if row.get(f) is not None)
             repo_liability = safe_float(row.get("repo_pct", 0.0))  # Repo borçluluktur
             
@@ -688,6 +687,12 @@ def calculate_security_scores(funds: List[dict]) -> None:
             if fund.get("inv_change") is not None and safe_float(fund.get("inv_change")) > 0:
                 score += POSITIVE_INVESTOR_FLOW_BONUS
 
+            # DÜZELTME: Valör (takas) süresi cezası artık gerçekten uygulanıyor.
+            # T+1 baz kabul edilir; fazla her gün likidite riskini artırır.
+            valor_days = safe_float(fund.get("valor"), 0.0)
+            if valor_days > 1:
+                score -= calculate_valor_penalty(valor_days - 1.0)
+
             fund["security_score"] = int(round(clamp(score, 0.0, 100.0)))
 
 def calculate_market_relative_momentum(funds: List[dict], reference, final_window: int) -> None:
@@ -854,7 +859,10 @@ def create_excel_output(wb, ws_list, all_funds_for_output, common_n_days):
                 sample_dates = item["dates"]
                 break
 
-    last_5_dates = sample_dates[-5:] if len(sample_dates) >= 5 else sample_dates
+    last_5_asc = sample_dates[-5:] if len(sample_dates) >= 5 else sample_dates
+    # DÜZELTME: D sütunundan itibaren EN GÜNCEL gün önce gelecek şekilde
+    # (geriye doğru kronolojik) sıralanıyor.
+    last_5_dates = list(reversed(last_5_asc))
 
     headers = ["Fon Kodu", "Fon Adı", "Yatırım Alanı"]
     for day in last_5_dates:
@@ -871,12 +879,13 @@ def create_excel_output(wb, ws_list, all_funds_for_output, common_n_days):
         "Veri Kaynağı", "Kaynak Zinciri", "Serbest Fon mu?", "Yapısal Kaynak"
     ])
 
-    for day in sample_dates: headers.append(f"{day} Trend Hibrit Skor")
-    for day in sample_dates: headers.append(f"{day} Getiri")
+    sample_dates_desc = list(reversed(sample_dates))
+    for day in sample_dates_desc: headers.append(f"{day} Trend Hibrit Skor")
+    for day in sample_dates_desc: headers.append(f"{day} Getiri")
     ws_scores.append(headers)
 
     header_index = {name: idx + 1 for idx, name in enumerate(headers)}
-    header_fill = PatternFill(start_color=COLOR_NAVY, fill_type="solid")
+    header_fill = PatternFill(start_color=COLOR_NAVY, end_color=COLOR_NAVY, fill_type="solid")
     header_font = Font(name="Calibri", bold=True, color=COLOR_WHITE)
 
     for cell in ws_scores[1]:
@@ -893,9 +902,11 @@ def create_excel_output(wb, ws_list, all_funds_for_output, common_n_days):
 
         row_data = [item["code"], item.get("fund_title") or "-", item.get("investment_area") or "-"]
         own_scores = item.get("running_trend_hybrid") or []
-        last_5_s = own_scores[-5:] if len(own_scores) >= 5 else own_scores
-        pad_len = len(last_5_dates) - len(last_5_s)
-        last_5_padded = [None] * pad_len + last_5_s
+        last_5_s_asc = own_scores[-5:] if len(own_scores) >= 5 else own_scores
+        pad_len = len(last_5_dates) - len(last_5_s_asc)
+        last_5_padded_asc = [None] * pad_len + last_5_s_asc
+        # Tarih sütunlarıyla aynı sırada: en güncel gün önce
+        last_5_padded = list(reversed(last_5_padded_asc))
 
         for score in last_5_padded:
             row_data.append(score if score is not None else "")
@@ -923,11 +934,11 @@ def create_excel_output(wb, ws_list, all_funds_for_output, common_n_days):
 
         n_dates = len(sample_dates)
         own_s_tail = ([None] * (n_dates - len(own_scores)) + own_scores) if len(own_scores) < n_dates else own_scores[-n_dates:]
-        row_data.extend([s if s is not None else "" for s in own_s_tail])
+        row_data.extend([s if s is not None else "" for s in reversed(own_s_tail)])
 
         own_rets = item.get("daily_returns") or []
         own_r_tail = ([None] * (n_dates - len(own_rets)) + own_rets) if len(own_rets) < n_dates else own_rets[-n_dates:]
-        row_data.extend([(format_percent(x) if x is not None else "-") for x in own_r_tail])
+        row_data.extend([(format_percent(x) if x is not None else "-") for x in reversed(own_r_tail)])
         ws_scores.append(row_data)
 
     # Renklendirme ve Biçimlendirme
@@ -948,9 +959,9 @@ def create_excel_output(wb, ws_list, all_funds_for_output, common_n_days):
     for sc in score_cols:
         col_let = get_column_letter(sc)
         s_range = f"{col_let}2:{col_let}{ws_scores.max_row}"
-        ws_scores.conditional_formatting.add(s_range, CellIsRule(operator="greaterThanOrEqual", formula=["75"], fill=PatternFill(start_color=COLOR_LIGHT_GREEN, fill_type="solid")))
-        ws_scores.conditional_formatting.add(s_range, CellIsRule(operator="between", formula=["50", "74"], fill=PatternFill(start_color=COLOR_LIGHT_YELLOW, fill_type="solid")))
-        ws_scores.conditional_formatting.add(s_range, CellIsRule(operator="lessThan", formula=["50"], fill=PatternFill(start_color=COLOR_LIGHT_RED, fill_type="solid")))
+        ws_scores.conditional_formatting.add(s_range, CellIsRule(operator="greaterThanOrEqual", formula=["75"], fill=PatternFill(start_color=COLOR_LIGHT_GREEN, end_color=COLOR_LIGHT_GREEN, fill_type="solid")))
+        ws_scores.conditional_formatting.add(s_range, CellIsRule(operator="between", formula=["50", "74"], fill=PatternFill(start_color=COLOR_LIGHT_YELLOW, end_color=COLOR_LIGHT_YELLOW, fill_type="solid")))
+        ws_scores.conditional_formatting.add(s_range, CellIsRule(operator="lessThan", formula=["50"], fill=PatternFill(start_color=COLOR_LIGHT_RED, end_color=COLOR_LIGHT_RED, fill_type="solid")))
 
     thin_gray = Side(style="thin", color="D9E1F2")
     for r in ws_scores.iter_rows():
@@ -1096,11 +1107,15 @@ for item in all_funds_for_output:
         "Yatırım Alanı": item.get("investment_area") or "-",
     }
     own_scores = item.get("running_trend_hybrid") or []
-    last_5_s = own_scores[-5:] if len(own_scores) >= 5 else own_scores
-    pad_len = len(last_5_dates_for_ui) - len(last_5_s)
-    last_5_padded = [None] * pad_len + last_5_s
+    # last_5_s_asc: kronolojik (eski -> yeni) sıra; 2 gün teyit alarmı bunu kullanır.
+    last_5_s_asc = own_scores[-5:] if len(own_scores) >= 5 else own_scores
+    pad_len = len(last_5_dates_for_ui) - len(last_5_s_asc)
+    last_5_padded_asc = [None] * pad_len + last_5_s_asc
+    # last_5_dates_for_ui artık en güncel gün önce sıralı (create_excel_output içinde
+    # ters çevrildi) -> ekran tablosu da aynı sırada gösterilsin.
+    last_5_padded_desc = list(reversed(last_5_padded_asc))
 
-    for day, score in zip(last_5_dates_for_ui, last_5_padded):
+    for day, score in zip(last_5_dates_for_ui, last_5_padded_desc):
         row_dict[f"{day} Karar Skoru"] = score if score is not None else ""
         row_dict[f"{day} Model Kararı"] = decision_label_from_score(score)
 
@@ -1116,18 +1131,18 @@ for item in all_funds_for_output:
     })
     display_rows.append(row_dict)
 
-    # 2 Gün / 2 Mum KAZRİSK Teyit Algoritması
-    if len(last_5_s) >= 2:
-        lbls = [decision_label_from_score(s) for s in last_5_s]
+    # 2 Gün / 2 Mum KAZRİSK Teyit Algoritması (kronolojik sırayla hesaplanır)
+    if len(last_5_s_asc) >= 2:
+        lbls = [decision_label_from_score(s) for s in last_5_s_asc]
         if lbls[-1] == "ACİL SAT" and lbls[-2] == "ACİL SAT":
             early_alerts.append({
                 "Fon Kodu": item["code"], "Fon Adı": item.get("fund_title"), "Alan": item.get("investment_area"),
-                "KAZRİSK Durumu": "🚨 2 GÜNDÜR TEYİTLİ ACİL SAT", "Son Skor": last_5_s[-1]
+                "KAZRİSK Durumu": "🚨 2 GÜNDÜR TEYİTLİ ACİL SAT", "Son Skor": last_5_s_asc[-1]
             })
         elif lbls[-1] == "GÜÇLÜ AL" and lbls[-2] == "GÜÇLÜ AL":
             early_alerts.append({
                 "Fon Kodu": item["code"], "Fon Adı": item.get("fund_title"), "Alan": item.get("investment_area"),
-                "KAZRİSK Durumu": "🚀 2 GÜNDÜR TEYİTLİ GÜÇLÜ AL", "Son Skor": last_5_s[-1]
+                "KAZRİSK Durumu": "🚀 2 GÜNDÜR TEYİTLİ GÜÇLÜ AL", "Son Skor": last_5_s_asc[-1]
             })
 
 df_display = pd.DataFrame(display_rows)
@@ -1149,10 +1164,23 @@ if early_alerts:
     st.subheader("🚨 KAZRİSK® 2 Günlük Teyitli Alarmlar")
     st.dataframe(pd.DataFrame(early_alerts), use_container_width=True, hide_index=True)
 
+if SHOW_DIAGNOSTICS:
+    with st.expander("🔧 Kaynak Tanılama Bilgisi"):
+        if failed_codes:
+            st.warning(f"Veri alınamayan {len(failed_codes)} fon: {', '.join(failed_codes)}")
+        diag_rows = [{
+            "Fon Kodu": item["code"],
+            "Veri Kaynağı": item.get("source", "-"),
+            "Kaynak Zinciri": item.get("source_chain", "-"),
+            "Veri Güveni": compute_confidence_label(item),
+            "Gözlem Sayısı (gün)": item.get("n_days", 0),
+            "Yapısal Veri Kaynağı": item.get("structural_source", "YOK"),
+        } for item in all_funds_for_output]
+        st.dataframe(pd.DataFrame(diag_rows), use_container_width=True, hide_index=True)
+
 st.download_button(
     label="📥 Güncellenmiş KAZRİSK Excel'i İndir",
     data=output,
     file_name="fonlar_KGDM3_KAZRISK_V8_5.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
-
