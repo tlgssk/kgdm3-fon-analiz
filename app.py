@@ -24,7 +24,8 @@ from urllib3.util.retry import Retry
 # ============================================================
 # - V8.3'ün istikrarlı kaynak izleme ve TEFAS yapısı korundu.
 # - V9.0'ın "Veri Kalitesi + Matematiksel Tutarlılık Denetimi" eklendi.
-# - Fiyat tutarlılık ve portföy (HHI) dağılım denetimleri aktif.
+# - Excel raporunda dinamik Karar/Skor ısı haritası ve % formatları düzeltildi.
+# - Streamlit Web arayüzünde "2 Günlük Teyitli Alarmlar" aktif edildi.
 # ============================================================
 
 st.set_page_config(
@@ -111,7 +112,7 @@ POSITIVE_INVESTOR_FLOW_BONUS = 3.0
 EMA_DECAY = 0.65
 
 # ============================================================
-# V9.1 VERİ KALİTESİ + MATEMATİKSEL TUTARLILIK DENETİMİ (V9.0'DAN)
+# V9.1 VERİ KALİTESİ + MATEMATİKSEL TUTARLILIK DENETİMİ
 # ============================================================
 
 DATA_QUALITY_MIN_SCORE = 55
@@ -167,10 +168,8 @@ def validate_price_series(fund: dict) -> Dict[str, Any]:
 
 def validate_structural_data(fund: dict) -> Dict[str, Any]:
     issues = []
-    # V8.3'te structure distribution tam verilmediği durumlarda hata atmaması için tolerans eklendi
     top_weight = fund.get("top_asset_weight")
     weights = [safe_float(top_weight)] if top_weight else []
-
     hhi = fund.get("asset_class_hhi")
     
     if fund.get("structural_fetch_ok") and not weights:
@@ -208,7 +207,6 @@ def audit_fund_data(fund: dict) -> dict:
     fund["data_quality_issues"] = " | ".join(dict.fromkeys(issues)) if issues else "OK"
     return fund
 
-
 # ============================================================
 # RENKLER & SIDEBAR
 # ============================================================
@@ -243,9 +241,8 @@ with st.sidebar.expander("⚖️ Skor Ağırlıkları"):
 with st.sidebar.expander("🔧 Tanılama"):
     SHOW_DIAGNOSTICS = st.checkbox("Kaynak tanılama bilgisini göster", value=True)
 
-
 # ============================================================
-# HTTP OTURUMU & YARDIMCI FONKSİYONLAR (V8.3 TEMELLİ)
+# HTTP OTURUMU & YARDIMCI FONKSİYONLAR
 # ============================================================
 
 @dataclass
@@ -686,10 +683,6 @@ def calculate_trend_scores(funds: List[dict]):
         else: f["trend_skor"] = None
     return n_days
 
-# ============================================================
-# KARAR
-# ============================================================
-
 def decision_label_from_score(score) -> str:
     if score is None: return "YETERSİZ VERİ"
     score = safe_float(score)
@@ -711,7 +704,7 @@ def finalize_decisions(funds: List[dict]):
         f["karar"] = decision_label_from_score(dec)
 
 def compute_confidence_label(fund: dict) -> str:
-    score = calculate_confidence_score(fund) # from v9.0
+    score = calculate_confidence_score(fund)
     if score >= 80: return f"🟢 Yüksek ({score})"
     if score >= 60: return f"🟡 Orta ({score})"
     return f"🔴 Düşük ({score})"
@@ -726,7 +719,7 @@ def calculate_confidence_score(fund: dict) -> int:
     return int(round(clamp(score, 0, 100)))
 
 # ============================================================
-# EXCEL ÇIKTISI (V8.3 TEMELLİ, V9.0 KALİTE METRİKLERİ İLE)
+# EXCEL ÇIKTISI (DİNAMİK RENK DÜZELTMESİ YAPILMIŞTIR)
 # ============================================================
 
 def create_excel_output(wb, ws_list, all_funds, common_n_days):
@@ -758,6 +751,8 @@ def create_excel_output(wb, ws_list, all_funds, common_n_days):
 
     ws_scores.append(headers)
     
+    header_index = {name: idx + 1 for idx, name in enumerate(headers)}
+
     fill = PatternFill(start_color=COLOR_NAVY, fill_type="solid")
     font = Font(name="Calibri", bold=True, color=COLOR_WHITE)
     for cell in ws_scores[1]: cell.fill, cell.font, cell.alignment = fill, font, Alignment(horizontal="center", vertical="center", wrap_text=True)
@@ -798,9 +793,64 @@ def create_excel_output(wb, ws_list, all_funds, common_n_days):
 
         ws_scores.append(row_data)
 
+    # ==========================================
+    # 1. METİN RENKLENDİRME (Model Kararları)
+    # ==========================================
+    green_font = Font(bold=True, color=COLOR_GREEN)
+    red_font = Font(bold=True, color=COLOR_RED)
+    yellow_font = Font(bold=True, color=COLOR_YELLOW)
+    
+    decision_cols = [idx for name, idx in header_index.items() if "Karar" in name and "Skor" not in name]
+
+    for row_number in range(2, ws_scores.max_row + 1):
+        for col_idx in decision_cols:
+            decision_cell = ws_scores.cell(row=row_number, column=col_idx)
+            decision_text = str(decision_cell.value or "").upper()
+
+            if "GÜÇLÜ AL" in decision_text or "ASIL LİSTE" in decision_text:
+                decision_cell.font = green_font
+            elif "DÜZELTME" in decision_text:
+                decision_cell.font = yellow_font
+            elif "ACİL SAT" in decision_text or "YETERSİZ" in decision_text:
+                decision_cell.font = red_font
+
+    # ==========================================
+    # 2. HÜCRE ARKA PLAN RENKLENDİRME (Skorlar)
+    # ==========================================
+    score_cols = [idx for name, idx in header_index.items() if "Skor" in name]
+
+    for col_idx in score_cols:
+        col_letter = get_column_letter(col_idx)
+        score_range = f"{col_letter}2:{col_letter}{ws_scores.max_row}"
+        ws_scores.conditional_formatting.add(score_range, CellIsRule(operator="greaterThanOrEqual", formula=["75"], fill=PatternFill(start_color=COLOR_LIGHT_GREEN, fill_type="solid")))
+        ws_scores.conditional_formatting.add(score_range, CellIsRule(operator="between", formula=["50", "74"], fill=PatternFill(start_color=COLOR_LIGHT_YELLOW, fill_type="solid")))
+        ws_scores.conditional_formatting.add(score_range, CellIsRule(operator="lessThan", formula=["50"], fill=PatternFill(start_color=COLOR_LIGHT_RED, fill_type="solid")))
+
+    # Para ve Yüzde formatlamaları
+    currency_col = header_index.get("AUM (₺)")
+    integer_col = header_index.get("Yatırımcı")
+
+    for row_number in range(2, ws_scores.max_row + 1):
+        if currency_col:
+            ws_scores.cell(row=row_number, column=currency_col).number_format = '#,##0.00 "₺"'
+        if integer_col:
+            ws_scores.cell(row=row_number, column=integer_col).number_format = "#,##0"
+            
+        percent_columns = ["Ort. Günlük Getiri (%)", "Volatilite (%)", "Kümülatif Getiri (%)", "MaxDD (%)", "En Büyük Varlık (%)", "Net Likidite (%)", "AUM Değişim (%)", "AUM Akış Proxy (%)", "Yatırımcı Değişim (%)", "Haftalık Bileşik (%)"]
+        
+        for col_name in percent_columns:
+            col_idx = header_index.get(col_name)
+            if col_idx:
+                val = ws_scores.cell(row=row_number, column=col_idx).value
+                if isinstance(val, (int, float)):
+                    ws_scores.cell(row=row_number, column=col_idx).number_format = '0.00"%"'
+
     thin = Side(style="thin", color="D9E1F2")
     for row in ws_scores.iter_rows():
-        for cell in row: cell.alignment, cell.border = Alignment(vertical="center"), Border(bottom=thin)
+        for cell in row:
+            cell.alignment = Alignment(vertical="center")
+            cell.border = Border(bottom=thin)
+            
     ws_scores.freeze_panes = "A2"
     ws_scores.sheet_view.showGridLines = False
 
@@ -810,7 +860,7 @@ def create_excel_output(wb, ws_list, all_funds, common_n_days):
     return output
 
 # ============================================================
-# ANA ARAYÜZ (STREAMLIT)
+# ANA ARAYÜZ (STREAMLIT YÜKLEME)
 # ============================================================
 
 col_upload, col_github = st.columns(2)
@@ -860,9 +910,7 @@ prog.empty()
 eligible = [f for f in calc_funds if f.get("n_days", 0) >= MIN_ROLLING_DAYS]
 
 with st.spinner("📊 Kalite denetimi ve skorlar hesaplanıyor..."):
-    # V9.0 KALİTE DENETİMİ ENTEGRASYONU
     for f in eligible: audit_fund_data(f)
-    
     calculate_security_scores(eligible)
     calculate_market_relative_momentum(eligible, ref, TARGET_TRADING_DAYS)
     common_n = calculate_trend_scores(eligible)
@@ -870,5 +918,102 @@ with st.spinner("📊 Kalite denetimi ve skorlar hesaplanıyor..."):
 
 output = create_excel_output(wb, ws_list, eligible, common_n)
 
-st.success(f"✅ V9.1 Analiz tamamlandı. {len(eligible)} fon işlendi.")
-st.download_button(label="📥 KAZRİSK V9.1 Excel İndir", data=output, file_name="fonlar_KGDM3_KAZRISK_FINAL_V9_1.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+# ============================================================
+# EKRAN TABLOSU & KAZRİSK 2 GÜN TEYİT ALARMLARI (WEB ARAYÜZÜ)
+# ============================================================
+
+display_rows = []
+early_alerts = []
+
+for item in eligible:
+    top_asset = item.get("top_asset_weight")
+    risk_label = "⚪ Veri Yok" if top_asset is None else ("⚠️ Yüksek Konsantrasyon" if top_asset > 30 else ("🟡 Orta Konsantrasyon" if top_asset > 15 else "🛡️ Dengeli"))
+    
+    row_dict = {
+        "Fon Kodu": item["code"],
+        "Fon Adı": item.get("fund_title") or "-",
+        "Yatırım Alanı": item.get("investment_area") or "-",
+    }
+    
+    own_scores = item.get("running_trend_hybrid") or []
+    last_5_s = own_scores[-5:] if len(own_scores) >= 5 else own_scores
+    dates = item.get("dates") or []
+    last_5_dates = dates[-len(last_5_s):] if dates else [f"Gün {i}" for i in range(len(last_5_s))]
+
+    for day, score in zip(last_5_dates, last_5_s):
+        row_dict[f"{day} Karar Skoru"] = score if score is not None else ""
+        row_dict[f"{day} Model Kararı"] = decision_label_from_score(score)
+
+    row_dict.update({
+        "Güncel Karar Skoru": item.get("decision_score"),
+        "Trend Skoru": item.get("trend_skor"),
+        "Güncel Karar": item.get("karar"),
+        "Net Likidite (%)": f"%{safe_float(item.get('emergency_cash_ratio')):.2f}" if item.get("cash_ratio_known") else "Veri Yok",
+        "KAZRİSK Konsantrasyon": risk_label,
+        "Haftalık Getiri (%)": round(safe_float(item.get("weekly_return")), 2),
+        "Veri Kalite Skoru": item.get("data_quality_score"),
+    })
+    display_rows.append(row_dict)
+
+    if len(last_5_s) >= 2:
+        lbls = [decision_label_from_score(s) for s in last_5_s]
+        if lbls[-1] == "ACİL SAT" and lbls[-2] == "ACİL SAT":
+            early_alerts.append({
+                "Fon Kodu": item["code"], "Fon Adı": item.get("fund_title"), "Alan": item.get("investment_area"),
+                "KAZRİSK Durumu": "🚨 2 GÜNDÜR TEYİTLİ ACİL SAT", "Son Skor": last_5_s[-1]
+            })
+        elif lbls[-1] == "GÜÇLÜ AL" and lbls[-2] == "GÜÇLÜ AL":
+            early_alerts.append({
+                "Fon Kodu": item["code"], "Fon Adı": item.get("fund_title"), "Alan": item.get("investment_area"),
+                "KAZRİSK Durumu": "🚀 2 GÜNDÜR TEYİTLİ GÜÇLÜ AL", "Son Skor": last_5_s[-1]
+            })
+
+df_display = pd.DataFrame(display_rows)
+
+def color_cells(value):
+    text = str(value).upper()
+    if "GÜÇLÜ AL" in text or "ASIL LİSTE" in text or "🟢" in text or "DENGELİ" in text: 
+        return "color: #008000; font-weight: bold;"
+    if "DÜZELTME" in text or "🟡" in text or "ORTA KONSANTRASYON" in text: 
+        return "color: #B8860B; font-weight: bold;"
+    if "ACİL SAT" in text or "YETERSİZ" in text or "🔴" in text or "YÜKSEK KONSANTRASYON" in text: 
+        return "color: #FF0000; font-weight: bold;"
+    return ""
+
+try: 
+    styled_df = df_display.style.map(color_cells)
+except AttributeError: 
+    styled_df = df_display.style.applymap(color_cells)
+
+st.subheader("📊 Analiz Sonuçları (V9.1)")
+st.dataframe(styled_df, use_container_width=True, hide_index=True)
+
+if early_alerts:
+    st.subheader("🚨 KAZRİSK® 2 Günlük Teyitli Alarmlar")
+    st.dataframe(pd.DataFrame(early_alerts), use_container_width=True, hide_index=True)
+
+st.success(f"✅ V9.1 Analiz tamamlandı. Toplam {len(eligible)} fon işlendi.")
+st.download_button(
+    label="📥 KAZRİSK V9.1 Excel İndir", 
+    data=output, 
+    file_name="fonlar_KGDM3_KAZRISK_FINAL_V9_1.xlsx", 
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+)
+
+if SHOW_DIAGNOSTICS:
+    st.subheader("🔎 Veri Kaynağı Tanılaması")
+    diagnostic_rows = []
+    for item in eligible:
+        for status in item.get("source_statuses", []):
+            diagnostic_rows.append({
+                "Fon": item["code"],
+                "Kaynak": status.get("source"),
+                "Denendi": "Evet" if status.get("attempted") else "Hayır",
+                "Başarılı": "Evet" if status.get("ok") else "Hayır",
+                "HTTP": status.get("status_code"),
+                "Hata": status.get("error_type"),
+                "Mesaj": status.get("message"),
+                "Süre ms": status.get("elapsed_ms"),
+            })
+    if diagnostic_rows:
+        st.dataframe(pd.DataFrame(diagnostic_rows), use_container_width=True, hide_index=True)
