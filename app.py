@@ -25,8 +25,8 @@ from urllib3.util.retry import Retry
 # - V8.3'ün istikrarlı kaynak izleme ve TEFAS yapısı korundu.
 # - V9.0'ın "Veri Kalitesi + Matematiksel Tutarlılık Denetimi" eklendi.
 # - Excel raporunda dinamik Karar/Skor ısı haritası ve % formatları düzeltildi.
-# - Streamlit Web arayüzünde "2 Günlük Teyitli Alarmlar" aktif edildi.
-# - Sütunlardaki tarihler doğrudan "BUGÜN" üzerinden geriye doğru hesaplanır.
+# - Sütunlardaki tarihler D Sütununda BUGÜN Karar Skoru olacak şekilde 
+#   Yeniden-Eskiye (Bugün -> Dün -> Önceki Gün) doğru sıralandı.
 # ============================================================
 
 st.set_page_config(
@@ -736,15 +736,19 @@ def create_excel_output(wb, ws_list, all_funds, common_n_days):
         "Haftalık Bileşik (%)", "Veri Kaynağı", "Kalite Uyarıları"
     ]
 
-    # Tarihleri "Bugün"den geriye doğru oluştur
+    # Tarihleri "Bugün"den geriye doğru (Bugün, Dün, Önceki Gün) oluştur
     today_dt = dt.date.today()
     n_dates_to_generate = common_n_days if common_n_days > 0 else 5
     sample_dates = [(today_dt - dt.timedelta(days=(n_dates_to_generate - 1 - i))).strftime("%d.%m") for i in range(n_dates_to_generate)]
     
+    # En sondan başa doğru son 5 gün (Yani 22.08, 21.08, 20.08...)
     last_5_dates = list(reversed(sample_dates[-5:]))
     
     daily_headers = []
-    for day in last_5_dates: daily_headers.extend([f"{day} Karar", f"{day} Karar Skoru"])
+    for day in last_5_dates: 
+        # SÜTUN D -> Skor, SÜTUN E -> Karar
+        daily_headers.extend([f"{day} Karar Skoru", f"{day} Model Kararı"])
+    
     headers[3:3] = daily_headers
 
     for day in sample_dates: headers.append(f"{day} Trend Skor")
@@ -767,8 +771,11 @@ def create_excel_output(wb, ws_list, all_funds, common_n_days):
         
         daily_scores = (item.get("running_trend_hybrid") or [])[-5:]
         daily_scores = [None] * max(0, len(last_5_dates) - len(daily_scores)) + daily_scores
+        
+        # Skorlar eski tarihten yeni tarihe doğru (18->19->...->22).
+        # Sütunları 22->21->20 diye sıraladığımız için listeyi ters çevirerek yazıyoruz.
         for s in reversed(daily_scores): 
-            row_data.extend([decision_label_from_score(s) if s is not None else "", s if s is not None else ""])
+            row_data.extend([s if s is not None else "", decision_label_from_score(s) if s is not None else ""])
 
         row_data.extend([
             item.get("valor", 0), item.get("decision_score"), item.get("trend_skor"), item.get("market_momentum"),
@@ -922,7 +929,7 @@ output = create_excel_output(wb, ws_list, eligible, common_n)
 display_rows = []
 early_alerts = []
 
-# Web için de bugün tarihli etiketler oluştur
+# Web için de bugün tarihli etiketler oluştur (Bugün, Dün, Önceki Gün)
 today_dt = dt.date.today()
 
 for item in eligible:
@@ -938,10 +945,13 @@ for item in eligible:
     own_scores = item.get("running_trend_hybrid") or []
     last_5_s = own_scores[-5:] if len(own_scores) >= 5 else own_scores
     
-    # Web arayüzü kolonlarını bugüne sabitle
-    last_5_dates_web = list(reversed([(today_dt - dt.timedelta(days=i)).strftime("%d.%m") for i in range(len(last_5_s))]))
+    # Web arayüzü kolonlarını bugüne sabitle (Bugün, Dün, Önceki Gün -> 22.08, 21.08 ...)
+    last_5_dates_web = [(today_dt - dt.timedelta(days=i)).strftime("%d.%m") for i in range(len(last_5_s))]
 
-    for day, score in zip(last_5_dates_web, last_5_s):
+    # Skorlar (last_5_s) eski tarihten yeni tarihe doğrudur (18.08 -> 22.08)
+    # Tarihleri ise yenisinden eskisine yazdık (22.08 -> 18.08)
+    # Bu yüzden last_5_s listesini de ters çevirerek (reversed) eşleştiriyoruz
+    for day, score in zip(last_5_dates_web, reversed(last_5_s)):
         row_dict[f"{day} Karar Skoru"] = score if score is not None else ""
         row_dict[f"{day} Model Kararı"] = decision_label_from_score(score)
 
