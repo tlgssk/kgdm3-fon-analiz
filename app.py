@@ -30,7 +30,7 @@ from urllib3.util.retry import Retry
 
 
 # ============================================================
-# KGDM-3 & KAZRİSK - SÜRÜM V8.5 (KAZRİSK UYUMLU)
+# KGDM-3 & KAZRİSK - SÜRÜM V8.6 (KAZRİSK UYUMLU)
 # ============================================================
 
 st.set_page_config(
@@ -42,7 +42,7 @@ st.set_page_config(
 st.title("📊 KGDM-3 & KAZRİSK Hibrit Fon Analizi")
 st.caption(
     "TEFAS + TEFAS Direct API + İş Yatırım | "
-    "Net Likidite + Serbest Fon Filtresi + 2 Mum Teyit Kuralı | V8.5"
+    "Net Likidite + Serbest Fon Filtresi + 2 Mum Teyit Kuralı | V8.6"
 )
 
 
