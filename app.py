@@ -26,6 +26,7 @@ from urllib3.util.retry import Retry
 # - V9.0'ın "Veri Kalitesi + Matematiksel Tutarlılık Denetimi" eklendi.
 # - Excel raporunda dinamik Karar/Skor ısı haritası ve % formatları düzeltildi.
 # - Streamlit Web arayüzünde "2 Günlük Teyitli Alarmlar" aktif edildi.
+# - Sütunlardaki tarihler doğrudan "BUGÜN" üzerinden geriye doğru hesaplanır.
 # ============================================================
 
 st.set_page_config(
@@ -719,7 +720,7 @@ def calculate_confidence_score(fund: dict) -> int:
     return int(round(clamp(score, 0, 100)))
 
 # ============================================================
-# EXCEL ÇIKTISI (DİNAMİK RENK DÜZELTMESİ YAPILMIŞTIR)
+# EXCEL ÇIKTISI (DİNAMİK RENK VE BUGÜN BAZLI TARİHLER)
 # ============================================================
 
 def create_excel_output(wb, ws_list, all_funds, common_n_days):
@@ -735,12 +736,12 @@ def create_excel_output(wb, ws_list, all_funds, common_n_days):
         "Haftalık Bileşik (%)", "Veri Kaynağı", "Kalite Uyarıları"
     ]
 
-    sample_dates = []
-    for item in all_funds:
-        if item.get("dates") and len(item["dates"]) >= common_n_days:
-            sample_dates = item["dates"][-common_n_days:]
-            break
-    last_5_dates = list(reversed(sample_dates[-5:])) if sample_dates else []
+    # Tarihleri "Bugün"den geriye doğru oluştur
+    today_dt = dt.date.today()
+    n_dates_to_generate = common_n_days if common_n_days > 0 else 5
+    sample_dates = [(today_dt - dt.timedelta(days=(n_dates_to_generate - 1 - i))).strftime("%d.%m") for i in range(n_dates_to_generate)]
+    
+    last_5_dates = list(reversed(sample_dates[-5:]))
     
     daily_headers = []
     for day in last_5_dates: daily_headers.extend([f"{day} Karar", f"{day} Karar Skoru"])
@@ -793,9 +794,7 @@ def create_excel_output(wb, ws_list, all_funds, common_n_days):
 
         ws_scores.append(row_data)
 
-    # ==========================================
     # 1. METİN RENKLENDİRME (Model Kararları)
-    # ==========================================
     green_font = Font(bold=True, color=COLOR_GREEN)
     red_font = Font(bold=True, color=COLOR_RED)
     yellow_font = Font(bold=True, color=COLOR_YELLOW)
@@ -814,9 +813,7 @@ def create_excel_output(wb, ws_list, all_funds, common_n_days):
             elif "ACİL SAT" in decision_text or "YETERSİZ" in decision_text:
                 decision_cell.font = red_font
 
-    # ==========================================
     # 2. HÜCRE ARKA PLAN RENKLENDİRME (Skorlar)
-    # ==========================================
     score_cols = [idx for name, idx in header_index.items() if "Skor" in name]
 
     for col_idx in score_cols:
@@ -925,6 +922,9 @@ output = create_excel_output(wb, ws_list, eligible, common_n)
 display_rows = []
 early_alerts = []
 
+# Web için de bugün tarihli etiketler oluştur
+today_dt = dt.date.today()
+
 for item in eligible:
     top_asset = item.get("top_asset_weight")
     risk_label = "⚪ Veri Yok" if top_asset is None else ("⚠️ Yüksek Konsantrasyon" if top_asset > 30 else ("🟡 Orta Konsantrasyon" if top_asset > 15 else "🛡️ Dengeli"))
@@ -937,10 +937,11 @@ for item in eligible:
     
     own_scores = item.get("running_trend_hybrid") or []
     last_5_s = own_scores[-5:] if len(own_scores) >= 5 else own_scores
-    dates = item.get("dates") or []
-    last_5_dates = dates[-len(last_5_s):] if dates else [f"Gün {i}" for i in range(len(last_5_s))]
+    
+    # Web arayüzü kolonlarını bugüne sabitle
+    last_5_dates_web = list(reversed([(today_dt - dt.timedelta(days=i)).strftime("%d.%m") for i in range(len(last_5_s))]))
 
-    for day, score in zip(last_5_dates, last_5_s):
+    for day, score in zip(last_5_dates_web, last_5_s):
         row_dict[f"{day} Karar Skoru"] = score if score is not None else ""
         row_dict[f"{day} Model Kararı"] = decision_label_from_score(score)
 
