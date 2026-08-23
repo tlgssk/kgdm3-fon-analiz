@@ -32,7 +32,7 @@ def new_init(self, *args, **kwargs):
 PatternFill.__init__ = new_init
 
 # ============================================================
-# KGDM-3 & KAZRİSK - SÜRÜM V13.14 (BOŞLUK DOLDURMA GÜNCELLEMESİ)
+# KGDM-3 & KAZRİSK - SÜRÜM V13.15 (NİHAİ BİRLEŞİM SÜRÜMÜ)
 # ============================================================
 
 st.set_page_config(
@@ -43,7 +43,7 @@ st.set_page_config(
 
 st.title("📊 KGDM-3 & KAZRİSK Hibrit Fon Analizi")
 st.caption(
-    "TEFAS + İş Yatırım | Gemini Canlı Sentiment (Toplu Sorgu) + Tam Senkron Tarihler | V13.14"
+    "TEFAS + İş Yatırım | Gemini 3.7 Sentiment (Toplu Sorgu) + Tam Senkron Tarihler | V13.15"
 )
 
 # ============================================================
@@ -67,7 +67,7 @@ MIN_REFERENCE_SAMPLE = 5
 OVERHEAT_Z_THRESHOLD = 2.0
 OVERHEAT_PENALTY = 6.0
 
-APP_VERSION = "13.14.0"
+APP_VERSION = "13.15.0"
 
 GITHUB_OWNER = "tlgssk"
 GITHUB_REPO = "kgdm3-fon-analiz"
@@ -114,7 +114,7 @@ def build_http_session() -> requests.Session:
     adapter = HTTPAdapter(max_retries=retry, pool_connections=10, pool_maxsize=10)
     session.mount("https://", adapter)
     session.mount("http://", adapter)
-    session.headers.update({"User-Agent": "KGDM3-Fon-Analiz/10.13", "Accept": "application/json,text/html"})
+    session.headers.update({"User-Agent": "KGDM3-Fon-Analiz/13.15", "Accept": "application/json,text/html"})
     return session
 
 HTTP = build_http_session()
@@ -160,7 +160,7 @@ api_key_input = st.sidebar.text_input(
     help="Google AI Studio API anahtarı. Boş bırakılırsa kural tabanlı duyarlılık çalışır.",
 )
 
-with st.sidebar.expander("⚖️ Skor Ağırlıkları (V13.14)"):
+with st.sidebar.expander("⚖️ Skor Ağırlıkları (V13.15)"):
     w_return = st.slider("Getiri ağırlığı", 0.0, 1.0, DEFAULT_MOMENTUM_WEIGHTS["return"], 0.05)
     w_sharpe = st.slider("Sharpe ağırlığı", 0.0, 1.0, DEFAULT_MOMENTUM_WEIGHTS["sharpe"], 0.05)
     w_cumulative = st.slider("Kümülatif ağırlığı", 0.0, 1.0, DEFAULT_MOMENTUM_WEIGHTS["cumulative"], 0.05)
@@ -191,7 +191,7 @@ SHOW_DIAGNOSTICS = st.sidebar.checkbox("Kaynak tanılama bilgisini göster", val
 
 
 # ============================================================
-# CANLI GEMINI DUYARLILIK MOTORU - V13.14 (BATCHING)
+# CANLI GEMINI DUYARLILIK MOTORU - V13.15
 # ============================================================
 
 def clamp(value, low, high): return max(low, min(high, value))
@@ -279,33 +279,45 @@ Her biri için maksimum 6 kelimelik kısa bir gerekçe etiketi üret.
         "generationConfig": {"responseMimeType": "application/json"}
     }
 
-    try:
-        response = requests.post(url, headers=headers, json=payload, timeout=25)
-        if response.status_code == 200:
-            data = response.json()
-            raw_text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "{}")
-            parsed_data = json.loads(raw_text.strip("```json\n").strip("```").strip())
-            
-            for area in areas:
-                if area in parsed_data:
-                    result_map[area] = {
-                        "score": int(clamp(safe_float(parsed_data[area].get("score", 50)), 0.0, 100.0)),
-                        "label": str(parsed_data[area].get("label", "Nötr")),
-                        "ai_active": True,
-                        "ai_reason": "Bağlantı Başarılı (Toplu Sorgu)"
-                    }
-                else:
-                    result_map[area] = {"score": 50, "label": "Nötr", "ai_active": True, "ai_reason": "Yapay Zeka bu alanı atladı"}
-            return result_map
-        else:
-            try: err_msg = response.json().get("error", {}).get("message", "")
-            except: err_msg = response.text[:50]
-            fail_reason = f"HTTP {response.status_code}: {err_msg}"
-    except Exception as exc:
-        fail_reason = f"Kod Hatası: {str(exc)[:40]}"
+    # V13.15 DÜZELTMESİ: 429 Hataları için Deep Sleep ve Retry döngüsü geri getirildi!
+    last_err = ""
+    for attempt in range(5):
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=25)
+            if response.status_code == 200:
+                data = response.json()
+                raw_text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "{}")
+                parsed_data = json.loads(raw_text.strip("```json\n").strip("```").strip())
+                
+                for area in areas:
+                    if area in parsed_data:
+                        result_map[area] = {
+                            "score": int(clamp(safe_float(parsed_data[area].get("score", 50)), 0.0, 100.0)),
+                            "label": str(parsed_data[area].get("label", "Nötr")),
+                            "ai_active": True,
+                            "ai_reason": "Bağlantı Başarılı (Toplu Sorgu)"
+                        }
+                    else:
+                        result_map[area] = {"score": 50, "label": "Nötr", "ai_active": True, "ai_reason": "Yapay Zeka bu alanı atladı"}
+                
+                time.sleep(6.0) # Google API dakika limit koruması
+                return result_map
+            elif response.status_code == 429:
+                last_err = "429 Kotası Aşıldı (Derin Uyku)"
+                time.sleep(20 + (attempt * 15))
+                continue
+            else:
+                try: err_msg = response.json().get("error", {}).get("message", "")
+                except: err_msg = response.text[:50]
+                last_err = f"HTTP {response.status_code}: {err_msg}"
+                time.sleep(3)
+        except Exception as exc:
+            last_err = f"Bağlantı Koptu: {str(exc)[:40]}"
+            time.sleep(5)
 
+    # 5 denemede de başarısız olursa
     for area in areas:
-        result_map[area] = {"score": 50, "label": "Nötr", "ai_active": False, "ai_reason": fail_reason}
+        result_map[area] = {"score": 50, "label": "Nötr", "ai_active": False, "ai_reason": f"API Hatası: {last_err}"}
     return result_map
 
 
@@ -354,18 +366,22 @@ def calculate_max_drawdown(prices):
     return max_dd
 
 def zscore(values):
+    # V13.15 DÜZELTMESİ: Verisi olmayan fonlara (None), Z-skoru olarak 0 atamak yerine None döner
     clean = [optional_float(v) for v in values]
-    clean = [v for v in clean if v is not None]
-    if len(clean) < 2:
-        return [0.0] * len(values)
-    mean_v = sum(clean) / len(clean)
-    std = (sum((x - mean_v) ** 2 for x in clean) / len(clean)) ** 0.5
+    valid = [v for v in clean if v is not None]
+    if len(valid) < 2:
+        return [0.0 if v is not None else None for v in clean]
+    mean_v = sum(valid) / len(valid)
+    std = (sum((x - mean_v) ** 2 for x in valid) / len(valid)) ** 0.5
     if std <= 1e-12:
-        return [0.0] * len(values)
+        return [0.0 if v is not None else None for v in clean]
+    
     out = []
-    for v in values:
-        n = optional_float(v)
-        out.append(clamp((n - mean_v) / std, -Z_LIMIT, Z_LIMIT) if n is not None else 0.0)
+    for v in clean:
+        if v is not None:
+            out.append(clamp((v - mean_v) / std, -Z_LIMIT, Z_LIMIT))
+        else:
+            out.append(None)
     return out
 
 def population_mean_std(values):
@@ -703,11 +719,14 @@ def calculate_security_scores(funds: List[dict], reference: dict):
         subset = [funds[i] for i in indices]
         ref = reference.get(kind, {})
 
-        # AUM ve yatırımcı sayısı sağa çarpık olduğundan log dönüşümü kullanılır.
+        # V13.14 HARİKA DOKUNUŞ: AUM ve yatırımcı sayısı sağa çarpık olduğundan log dönüşümü kullanılır.
         aum_ref = [safe_float(x) for x in ref.get("aum", []) if optional_float(x) is not None and safe_float(x) > 0]
         inv_ref = [safe_float(x) for x in ref.get("investors", []) if optional_float(x) is not None and safe_float(x) > 0]
 
-        for f in subset:
+        flow_z = zscore([f.get("aum_flow_proxy") for f in subset])
+        inv_c_z = zscore([f.get("inv_change") for f in subset])
+
+        for local_i, f in enumerate(subset):
             aum = optional_float(f.get("aum"))
             investors = optional_float(f.get("investors"))
             aum_pop = [math.log1p(x) for x in aum_ref]
@@ -715,16 +734,14 @@ def calculate_security_scores(funds: List[dict], reference: dict):
             aum_pct = percentile_score(math.log1p(aum) if aum and aum > 0 else None, aum_pop)
             inv_pct = percentile_score(math.log1p(investors) if investors and investors > 0 else None, inv_pop)
 
-            flow_pop = [x.get("aum_flow_proxy") for x in subset]
-            inv_change_pop = [x.get("inv_change") for x in subset]
-            flow_pct = percentile_score(f.get("aum_flow_proxy"), flow_pop)
-            inv_change_pct = percentile_score(f.get("inv_change"), inv_change_pop)
-
             s = 50.0
             s += (aum_pct - 50.0) * 0.22
             s += (inv_pct - 50.0) * 0.18
-            s += (flow_pct - 50.0) * 0.12 if f.get("aum_flow_proxy") is not None else 0.0
-            s += (inv_change_pct - 50.0) * 0.08 if f.get("inv_change") is not None else 0.0
+            
+            if f.get("aum_flow_proxy") is not None and flow_z[local_i] is not None:
+                s += SECURITY_SCALE["aum_flow"] * flow_z[local_i]
+            if f.get("inv_change") is not None and inv_c_z[local_i] is not None:
+                s += SECURITY_SCALE["investor_change"] * inv_c_z[local_i]
 
             hhi = optional_float(f.get("structural_hhi"))
             if hhi is not None and hhi > 25.0:
@@ -772,7 +789,6 @@ def calculate_market_relative_momentum(funds: List[dict], reference, window: int
             zm = zscore_against_population(m_r, mm, ms)
             zs = zscore_against_population(f["_final_sharpe"], sm, ss)
             zc = zscore_against_population(cum, cm, cs)
-            # max_dd_inv = pozitif "drawdown yokluğu"; bizim -dd de pozitif oldukça iyidir.
             zd = zscore_against_population(-dd, dm, ds)
             f["reference_scope"] = f"Piyasa ({k})"
         else:
@@ -803,41 +819,31 @@ def calculate_trend_scores(funds: List[dict], batch_sentiments: dict) -> int:
     if not funds:
         return 0
 
-    # Farklı kaynaklardan gelen serilerde pozisyon bazlı eşleştirme yerine
-    # gerçek işlem tarihi kesişimi kullanılır.
-    common_dates = None
+    # V13.15 DÜZELTMESİ: Kesişim (Intersection) Tuzağı giderildi. "Union" ile master timeline yaratıldı.
+    all_dates = set()
     for f in funds:
-        dates = set(f.get("dates", []))
-        common_dates = dates if common_dates is None else common_dates.intersection(dates)
-
-    common_dates = sorted(common_dates or [])
-    if len(common_dates) < MIN_ROLLING_DAYS:
+        all_dates.update(f.get("dates", []))
+        
+    master_dates = sorted(list(all_dates))
+    if len(master_dates) < MIN_ROLLING_DAYS:
         return 0
-
-    common_dates = common_dates[-TARGET_TRADING_DAYS:]
+        
+    master_dates = master_dates[-TARGET_TRADING_DAYS:]
+    
     for f in funds:
         ret_map = dict(zip(f.get("dates", []), f.get("daily_returns", [])))
-        f["dates"] = common_dates
-        f["daily_returns"] = [ret_map[d] for d in common_dates if d in ret_map]
-        f["n_days"] = len(f["daily_returns"])
+        f["dates"] = master_dates
+        f["daily_returns"] = [ret_map.get(d) for d in master_dates]
+        f["n_days"] = len([r for r in f["daily_returns"] if r is not None])
 
-        # Her ortak tarih için fiyat haritasından ilgili fiyatları yeniden kur.
         pmap = f.get("price_map", {})
-        prev_date = None
-        # Ortak aralığın ilk gününün bir önceki fiyatı gerekir.
-        all_pd = sorted(pmap.keys())
-        first = common_dates[0]
-        if first in all_pd:
-            idx = all_pd.index(first)
-            if idx > 0:
-                prev_date = all_pd[idx - 1]
-        price_dates = ([prev_date] if prev_date else []) + common_dates
-        prices = [pmap[d] for d in price_dates if d in pmap]
-        f["prices"] = prices
+        f["prices"] = []
+        for d in master_dates:
+            f["prices"].append(pmap.get(d))
+                
         f["running_trend_momentum"] = []
 
-    # Her tarih için son MIN_ROLLING_DAYS getiriyi kullan; skor o günün tarihine yazılır.
-    for end_idx, day in enumerate(common_dates):
+    for end_idx, day in enumerate(master_dates):
         if end_idx + 1 < MIN_ROLLING_DAYS:
             for f in funds:
                 f["running_trend_momentum"].append(None)
@@ -846,22 +852,29 @@ def calculate_trend_scores(funds: List[dict], batch_sentiments: dict) -> int:
         cur = []
         window_start = end_idx + 1 - MIN_ROLLING_DAYS
         for f in funds:
-            r = f["daily_returns"][window_start:end_idx + 1]
+            r_raw = f["daily_returns"][window_start:end_idx + 1]
+            r = [x for x in r_raw if x is not None]
+            
             if len(r) < MIN_ROLLING_DAYS:
                 continue
+                
             pmap = f.get("price_map", {})
-            price_dates = common_dates[window_start:end_idx + 1]
-            first_day = price_dates[0]
             all_pd = sorted(pmap.keys())
+            first_day = master_dates[window_start]
+            
             try:
                 pidx = all_pd.index(first_day)
                 prev = all_pd[pidx - 1] if pidx > 0 else None
             except ValueError:
-                prev = None
-            p_window_dates = ([prev] if prev else []) + price_dates
+                prev_candidates = [k for k in all_pd if k < first_day]
+                prev = prev_candidates[-1] if prev_candidates else None
+                
+            p_window_dates = ([prev] if prev else []) + master_dates[window_start:end_idx + 1]
             p = [pmap[d] for d in p_window_dates if d in pmap]
+            
             if len(p) < MIN_ROLLING_DAYS + 1:
                 continue
+                
             mr = sum(r) / len(r)
             vol = (sum((x - mr) ** 2 for x in r) / len(r)) ** 0.5
             cur.append({
@@ -924,7 +937,7 @@ def calculate_trend_scores(funds: List[dict], batch_sentiments: dict) -> int:
         else:
             f["trend_skor"] = None
 
-    return len(common_dates)
+    return len(master_dates)
 
 def decision_label_from_score(score) -> str:
     if score is None: return "YETERSİZ VERİ"
@@ -965,11 +978,11 @@ def calculate_confidence_score(fund: dict) -> int:
     elif fund.get("n_days", 0) >= MIN_ROLLING_DAYS: score += 12
     if fund.get("source") == "TEFAS": score += 25
     if fund.get("structural_fetch_ok", False): score += 20
-    if fund.get("aum") is not None and safe_float(fund.get("aum")) > 0: score += 5
+    if optional_float(fund.get("aum")) is not None and optional_float(fund.get("aum")) > 0: score += 5
     return int(round(clamp(score, 0, 100)))
 
 # ============================================================
-# EXCEL ÇIKTISI (DİNAMİK TARİH EŞLEŞTİRME & BOŞLUK DOLDURMA)
+# EXCEL ÇIKTISI
 # ============================================================
 
 def create_excel_output(wb, ws_list, all_funds, common_n_days):
@@ -980,7 +993,9 @@ def create_excel_output(wb, ws_list, all_funds, common_n_days):
     
     all_dates = set()
     for f in all_funds:
-        all_dates.update(f.get("dates", []))
+        for d in f.get("dates", []):
+            if d is not None:
+                all_dates.add(d)
         
     def parse_dm(dm_str):
         try:
@@ -1030,7 +1045,6 @@ def create_excel_output(wb, ws_list, all_funds, common_n_days):
         score_map = dict(zip(fund_dates, fund_scores))
         ret_map = dict(zip(fund_dates, fund_rets))
 
-        # V13.14: "" yerine "Veri Açıklanmadı" yazılması sağlandı
         for day in reversed(last_5_dates):
             s = score_map.get(day)
             row_data.extend([
@@ -1158,7 +1172,7 @@ prog.empty()
 
 eligible = [f for f in calc_funds if f.get("n_days", 0) >= MIN_ROLLING_DAYS]
 
-with st.spinner("📊 V10 Modeli (Gemini Toplu Sentiment + Baseline) Hesaplanıyor..."):
+with st.spinner("📊 V13 Modeli (Gemini Toplu Sentiment + Baseline) Hesaplanıyor..."):
     for f in eligible: audit_fund_data(f)
     calculate_security_scores(eligible, ref)
     calculate_market_relative_momentum(eligible, ref, TARGET_TRADING_DAYS)
@@ -1177,7 +1191,7 @@ output = create_excel_output(wb, ws_list, eligible, common_n)
 # SKOR ÖZETLERİ VE EKRAN TABLOSU
 # ============================================================
 
-st.subheader("📈 KAZRİSK Portföy Özeti (V13.14)")
+st.subheader("📈 KAZRİSK Portföy Özeti (V13.15)")
 col1, col2, col3, col4 = st.columns(4)
 scores = [safe_float(x.get("decision_score")) for x in eligible if x.get("decision_score") is not None]
 if scores:
@@ -1191,7 +1205,9 @@ early_alerts = []
 
 all_dates_ui = set()
 for f in eligible:
-    all_dates_ui.update(f.get("dates", []))
+    for d in f.get("dates", []):
+        if d is not None:
+            all_dates_ui.add(d)
     
 def parse_dm_ui(dm_str):
     try:
@@ -1217,7 +1233,6 @@ for item in eligible:
     own_scores = item.get("running_trend_hybrid") or []
     score_map = dict(zip(fund_dates, own_scores))
 
-    # V13.14: Ekranda boş kalmasın diye de eklendi
     for day in reversed(last_5_dates_web):
         s = score_map.get(day)
         row_dict[f"{display_date(day)} Karar Skoru"] = s if s is not None else "Veri Açıklanmadı"
@@ -1240,7 +1255,6 @@ for item in eligible:
     if len(valid_history) >= 2:
         (d1, s1), (d2, s2) = valid_history[-2], valid_history[-1]
         lbl1, lbl2 = decision_label_from_score(s1), decision_label_from_score(s2)
-        # Gerçekten ardışık işlem günleri olmasını şart koş.
         consecutive = False
         try:
             consecutive = (pd.to_datetime(d2) - pd.to_datetime(d1)).days <= 4
@@ -1279,7 +1293,7 @@ try:
 except AttributeError:
     styled_df = df_display.style.applymap(color_cells)
 
-st.subheader("📊 Analiz Sonuçları — Son 5 İşlem Günü Kararları (V13.14)")
+st.subheader("📊 Analiz Sonuçları — Son 5 İşlem Günü Kararları (V13.15)")
 st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
 # ============================================================
@@ -1306,11 +1320,11 @@ if sell_alerts or buy_alerts:
         else:
             st.success("Şu an teyitli 'Güçlü Al' fırsatı veren fon yok.")
 
-st.success(f"✅ V13.14 Analiz tamamlandı. Toplam {len(eligible)} fon işlendi.")
+st.success(f"✅ V13.15 Analiz tamamlandı. Toplam {len(eligible)} fon işlendi.")
 st.download_button(
-    label="📥 KAZRİSK V13.14 Excel İndir",
+    label="📥 KAZRİSK V13.15 Excel İndir",
     data=output,
-    file_name="fonlar_KGDM3_KAZRISK_FINAL_V13_14.xlsx",
+    file_name="fonlar_KGDM3_KAZRISK_FINAL_V13_15.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
 
