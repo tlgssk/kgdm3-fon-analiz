@@ -32,16 +32,16 @@ def new_init(self, *args, **kwargs):
 PatternFill.__init__ = new_init
 
 # ============================================================
-# KGDM-3 & KAZRİSK - SÜRÜM V13.15 (NİHAİ BİRLEŞİM SÜRÜMÜ)
+# tlgssk - SÜRÜM V13.15 (NİHAİ BİRLEŞİM SÜRÜMÜ)
 # ============================================================
 
 st.set_page_config(
-    page_title="KGDM-3 & KAZRİSK Hibrit Fon Analizi",
+    page_title="tlgssk Hibrit Fon Analizi",
     page_icon="📊",
     layout="wide",
 )
 
-st.title("📊 KGDM-3 & KAZRİSK Hibrit Fon Analizi")
+st.title("📊 tlgssk Hibrit Fon Analizi")
 st.caption(
     "TEFAS + İş Yatırım | Gemini 3.7 Sentiment (Toplu Sorgu) + Tam Senkron Tarihler | V13.15"
 )
