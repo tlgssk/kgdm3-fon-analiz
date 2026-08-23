@@ -32,7 +32,7 @@ def new_init(self, *args, **kwargs):
 PatternFill.__init__ = new_init
 
 # ============================================================
-# KGDM-3 & KAZRİSK - SÜRÜM V10.12 (DİNAMİK TARİH HİZALAMA)
+# KGDM-3 & KAZRİSK - SÜRÜM V10.13 (BOŞLUK DOLDURMA GÜNCELLEMESİ)
 # ============================================================
 
 st.set_page_config(
@@ -43,7 +43,7 @@ st.set_page_config(
 
 st.title("📊 KGDM-3 & KAZRİSK Hibrit Fon Analizi")
 st.caption(
-    "TEFAS + İş Yatırım | Gemini Canlı Sentiment (Toplu Sorgu) + Tam Senkron Tarihler | V10.12"
+    "TEFAS + İş Yatırım | Gemini Canlı Sentiment (Toplu Sorgu) + Tam Senkron Tarihler | V10.13"
 )
 
 # ============================================================
@@ -67,7 +67,7 @@ MIN_REFERENCE_SAMPLE = 5
 OVERHEAT_Z_THRESHOLD = 2.0
 OVERHEAT_PENALTY = 6.0
 
-APP_VERSION = "10.12.0"
+APP_VERSION = "10.13.0"
 
 GITHUB_OWNER = "tlgssk"
 GITHUB_REPO = "kgdm3-fon-analiz"
@@ -113,7 +113,7 @@ def build_http_session() -> requests.Session:
     adapter = HTTPAdapter(max_retries=retry, pool_connections=10, pool_maxsize=10)
     session.mount("https://", adapter)
     session.mount("http://", adapter)
-    session.headers.update({"User-Agent": "KGDM3-Fon-Analiz/10.12", "Accept": "application/json,text/html"})
+    session.headers.update({"User-Agent": "KGDM3-Fon-Analiz/10.13", "Accept": "application/json,text/html"})
     return session
 
 HTTP = build_http_session()
@@ -161,7 +161,7 @@ api_key_input = st.sidebar.text_input(
 
 ENABLE_FILTERS = st.sidebar.checkbox("Filtreleri Etkinleştir", value=False)
 
-with st.sidebar.expander("⚖️ Skor Ağırlıkları (V10.12)"):
+with st.sidebar.expander("⚖️ Skor Ağırlıkları (V10.13)"):
     w_return = st.slider("Getiri ağırlığı", 0.0, 1.0, DEFAULT_MOMENTUM_WEIGHTS["return"], 0.05)
     w_sharpe = st.slider("Sharpe ağırlığı", 0.0, 1.0, DEFAULT_MOMENTUM_WEIGHTS["sharpe"], 0.05)
     w_cumulative = st.slider("Kümülatif ağırlığı", 0.0, 1.0, DEFAULT_MOMENTUM_WEIGHTS["cumulative"], 0.05)
@@ -192,7 +192,7 @@ SHOW_DIAGNOSTICS = st.sidebar.checkbox("Kaynak tanılama bilgisini göster", val
 
 
 # ============================================================
-# CANLI GEMINI DUYARLILIK MOTORU - V10.12 (BATCHING)
+# CANLI GEMINI DUYARLILIK MOTORU - V10.13 (BATCHING)
 # ============================================================
 
 def clamp(value, low, high): return max(low, min(high, value))
@@ -741,9 +741,8 @@ def calculate_confidence_score(fund: dict) -> int:
     if fund.get("aum") is not None and safe_float(fund.get("aum")) > 0: score += 5
     return int(round(clamp(score, 0, 100)))
 
-
 # ============================================================
-# EXCEL ÇIKTISI (DİNAMİK TARİH EŞLEŞTİRME)
+# EXCEL ÇIKTISI (DİNAMİK TARİH EŞLEŞTİRME & BOŞLUK DOLDURMA)
 # ============================================================
 
 def create_excel_output(wb, ws_list, all_funds, common_n_days):
@@ -752,7 +751,6 @@ def create_excel_output(wb, ws_list, all_funds, common_n_days):
 
     n_dates = common_n_days if common_n_days > 0 else 5
     
-    # YENİ: Verilen fonların "Gerçek İş Günü" tarihlerini topla ve sırala
     all_dates = set()
     for f in all_funds:
         all_dates.update(f.get("dates", []))
@@ -781,7 +779,6 @@ def create_excel_output(wb, ws_list, all_funds, common_n_days):
     ]
 
     daily_headers = []
-    # Dinamik tarihli sütun başlıkları ekleniyor
     for day in reversed(last_5_dates): 
         daily_headers.extend([f"{day} Karar Skoru", f"{day} Model Kararı"])
     headers[3:3] = daily_headers
@@ -803,7 +800,6 @@ def create_excel_output(wb, ws_list, all_funds, common_n_days):
 
         row_data = [item["code"], item.get("fund_title") or "-", item.get("investment_area") or "-"]
 
-        # YENİ: Fonun tarihlerini sözlük anahtarı olarak kullanarak tam hizalama yapıyoruz
         fund_dates = item.get("dates", [])
         fund_scores = item.get("running_trend_hybrid", [])
         fund_rets = item.get("daily_returns", [])
@@ -811,9 +807,13 @@ def create_excel_output(wb, ws_list, all_funds, common_n_days):
         score_map = dict(zip(fund_dates, fund_scores))
         ret_map = dict(zip(fund_dates, fund_rets))
 
+        # V10.13: "" yerine "Veri Açıklanmadı" yazılması sağlandı
         for day in reversed(last_5_dates):
             s = score_map.get(day)
-            row_data.extend([s if s is not None else "", decision_label_from_score(s) if s is not None else ""])
+            row_data.extend([
+                s if s is not None else "Veri Açıklanmadı", 
+                decision_label_from_score(s) if s is not None else "Veri Açıklanmadı"
+            ])
 
         row_data.extend([
             item.get("valor", 0), item.get("decision_score"), item.get("trend_skor"), item.get("market_momentum"),
@@ -831,11 +831,11 @@ def create_excel_output(wb, ws_list, all_funds, common_n_days):
 
         for day in sample_dates:
             s = score_map.get(day)
-            row_data.append(s if s is not None else "")
+            row_data.append(s if s is not None else "Veri Açıklanmadı")
             
         for day in sample_dates:
             r = ret_map.get(day)
-            row_data.append(format_percent(r) if r is not None else "")
+            row_data.append(format_percent(r) if r is not None else "Veri Açıklanmadı")
 
         ws_scores.append(row_data)
 
@@ -954,7 +954,7 @@ output = create_excel_output(wb, ws_list, eligible, common_n)
 # SKOR ÖZETLERİ VE EKRAN TABLOSU
 # ============================================================
 
-st.subheader("📈 KAZRİSK Portföy Özeti (V10.12)")
+st.subheader("📈 KAZRİSK Portföy Özeti (V10.13)")
 col1, col2, col3, col4 = st.columns(4)
 scores = [safe_float(x.get("decision_score")) for x in eligible if x.get("decision_score") is not None]
 if scores:
@@ -966,7 +966,6 @@ if scores:
 display_rows = []
 early_alerts = []
 
-# YENİ: Arayüz tablosu için de gerçek tarihler hesaplanıyor
 all_dates_ui = set()
 for f in eligible:
     all_dates_ui.update(f.get("dates", []))
@@ -999,10 +998,11 @@ for item in eligible:
     own_scores = item.get("running_trend_hybrid") or []
     score_map = dict(zip(fund_dates, own_scores))
 
+    # V10.13: Ekranda boş kalmasın diye de eklendi
     for day in reversed(last_5_dates_web):
         s = score_map.get(day)
-        row_dict[f"{day} Karar Skoru"] = s if s is not None else ""
-        row_dict[f"{day} Model Kararı"] = decision_label_from_score(s) if s is not None else ""
+        row_dict[f"{day} Karar Skoru"] = s if s is not None else "Veri Açıklanmadı"
+        row_dict[f"{day} Model Kararı"] = decision_label_from_score(s) if s is not None else "Veri Açıklanmadı"
 
     row_dict.update({
         "Sentiment Skoru": item.get("sentiment_score"),
@@ -1047,7 +1047,7 @@ try:
 except AttributeError:
     styled_df = df_display.style.applymap(color_cells)
 
-st.subheader("📊 Analiz Sonuçları (V10.12)")
+st.subheader("📊 Analiz Sonuçları (V10.13)")
 st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
 # ============================================================
@@ -1074,11 +1074,11 @@ if sell_alerts or buy_alerts:
         else:
             st.success("Şu an teyitli 'Güçlü Al' fırsatı veren fon yok.")
 
-st.success(f"✅ V10.12 Analiz tamamlandı. Toplam {len(eligible)} fon işlendi.")
+st.success(f"✅ V10.13 Analiz tamamlandı. Toplam {len(eligible)} fon işlendi.")
 st.download_button(
-    label="📥 KAZRİSK V10.12 Excel İndir",
+    label="📥 KAZRİSK V10.13 Excel İndir",
     data=output,
-    file_name="fonlar_KGDM3_KAZRISK_FINAL_V10_12.xlsx",
+    file_name="fonlar_KGDM3_KAZRISK_FINAL_V10_13.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
 
