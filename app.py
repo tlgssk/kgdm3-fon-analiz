@@ -1,5 +1,5 @@
 # ============================================================
-# tlgssk - SÜRÜM V16.1 (GEMINI AI TAM ONARILMIŞ VE AKTİF SÜRÜM)
+# tlgssk - SÜRÜM V16.2 (URL PARSER VE BAĞLANTI ADAPTÖRÜ DÜZELTMESİ)
 # ============================================================
 
 import concurrent.futures
@@ -45,7 +45,7 @@ st.set_page_config(
 
 st.title("📊 tlgssk Hibrit Fon Analizi")
 st.caption(
-    "TEFAS Resmi Canlı Takasbank Veri Motoru | Aktif Gemini Canlı Duyarlılık | V16.1"
+    "TEFAS Resmi Canlı Takasbank Veri Motoru | KAZRİSK V16.2"
 )
 
 # ============================================================
@@ -56,7 +56,7 @@ LOOKBACK_CALENDAR_DAYS = 45
 TARGET_TRADING_DAYS = 10
 MIN_ROLLING_DAYS = 2
 
-HTTP_TIMEOUT = 15
+HTTP_TIMEOUT = 12
 
 DEFAULT_MOMENTUM_WEIGHTS = {"return": 0.30, "sharpe": 0.25, "cumulative": 0.25, "drawdown": 0.20}
 SECURITY_WEIGHTS = {"aum": 0.30, "investor": 0.25, "concentration": 0.25, "liquidity": 0.20}
@@ -199,7 +199,7 @@ def safe_std(values):
     return (sum((x - mean_v) ** 2 for x in vals) / len(vals)) ** 0.5
 
 # ============================================================
-# CANLI GEMINI DUYARLILIK MOTORU (GÜNCELLENMİŞ & SAĞLAM)
+# CANLI GEMINI DUYARLILIK MOTORU
 # ============================================================
 
 @st.cache_data(ttl=60 * 60 * 4, show_spinner=False)
@@ -231,8 +231,7 @@ JSON formatında sadece geçerli bir obje döndür:
   "Alan Adı": {{"score": 75, "label": "Kısa gerekçe"}}
 }}"""
 
-    # Gemini 2.5 Flash Endpoint
-    url = f"[https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=](https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=){api_key_clean}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key_clean}"
     headers = {'Content-Type': 'application/json'}
     payload = {
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
@@ -270,7 +269,6 @@ JSON formatında sadece geçerli bir obje döndür:
     except Exception as exc:
         err_msg = str(exc)[:60]
 
-    # Hata durumunda kural tabanlı koruma
     for area in areas:
         a_u = area.upper()
         if "ALTIN" in a_u or "KIYMETLİ" in a_u: default_s, default_l = 82, "Güçlü Pozitif"
@@ -287,7 +285,7 @@ JSON formatında sadece geçerli bir obje döndür:
     return result_map
 
 # ============================================================
-# TEFAS DOĞRUDAN VE KÜTÜPHANE DESTEKLİ ÇEKİCİ
+# TEFAS DOĞRUDAN VE KÜTÜPHANE DESTEKLİ ÇEKİCİ (TEMİZLENMİŞ URL)
 # ============================================================
 
 def fetch_tefas_crawler_engine(fund_code: str):
@@ -323,14 +321,14 @@ def fetch_tefas_crawler_engine(fund_code: str):
     except Exception:
         pass
 
-    # 2. Öncelik: TEFAS Web Karşılaştırma API
-    url = "[https://www.tefas.gov.tr/api/DB/BindComparisonFundReturns](https://www.tefas.gov.tr/api/DB/BindComparisonFundReturns)"
+    # 2. Öncelik: TEFAS Web Karşılaştırma API (Mutlak Düzeltilmiş String URL)
+    target_url = "https://www.tefas.gov.tr/api/DB/BindComparisonFundReturns"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
         "Accept": "application/json, text/javascript, */*; q=0.01",
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-        "Origin": "[https://www.tefas.gov.tr](https://www.tefas.gov.tr)",
-        "Referer": "[https://www.tefas.gov.tr/TarihselVeriler.aspx](https://www.tefas.gov.tr/TarihselVeriler.aspx)",
+        "Origin": "https://www.tefas.gov.tr",
+        "Referer": "https://www.tefas.gov.tr/TarihselVeriler.aspx",
         "X-Requested-With": "XMLHttpRequest"
     }
     payload = {
@@ -342,7 +340,7 @@ def fetch_tefas_crawler_engine(fund_code: str):
 
     try:
         session = requests.Session()
-        res = session.post(url, data=payload, headers=headers, timeout=HTTP_TIMEOUT)
+        res = session.post(str(target_url).strip(), data=payload, headers=headers, timeout=HTTP_TIMEOUT)
         status["status_code"] = res.status_code
         status["elapsed_ms"] = int((time.time() - t0) * 1000)
 
@@ -730,7 +728,7 @@ input_method = st.radio(
 # 1. GITHUB'DAN DOSYA ÇEKME
 if input_method == "🌐 GitHub'dan Otomatik Çek (Raw URL)":
     st.info("💡 GitHub reponuzdaki raw Excel dosya bağlantısını girerek otomatik analiz başlatabilirsiniz.")
-    default_gh_url = "[https://raw.githubusercontent.com/tlgssk/kazrisk/main/fonlar.xlsx](https://raw.githubusercontent.com/tlgssk/kazrisk/main/fonlar.xlsx)"
+    default_gh_url = "https://raw.githubusercontent.com/tlgssk/kazrisk/main/fonlar.xlsx"
     with st.form("github_entry_form"):
         github_url = st.text_input("GitHub Raw Excel Bağlantısı:", value=default_gh_url)
         if st.form_submit_button("🚀 GitHub Dosyasını İndir ve Analiz Et", type="primary", use_container_width=True):
@@ -864,7 +862,7 @@ st.dataframe(pd.DataFrame(stream_cards), use_container_width=True, hide_index=Tr
 # SKOR ÖZETLERİ VE EKRAN TABLOSU
 # ============================================================
 
-st.subheader("📈 KAZRİSK Portföy Özeti (V16.1)")
+st.subheader("📈 KAZRİSK Portföy Özeti (V16.2)")
 col1, col2, col3, col4 = st.columns(4)
 scores = [safe_float(x.get("decision_score")) for x in calc_funds if x.get("decision_score") is not None]
 if scores:
@@ -932,7 +930,7 @@ def color_cells(value):
 try: styled_df = df_display.style.map(color_cells)
 except AttributeError: styled_df = df_display.style.applymap(color_cells)
 
-st.subheader("📊 Analiz Sonuçları — Son 5 İşlem Günü Kararları (V16.1)")
+st.subheader("📊 Analiz Sonuçları — Son 5 İşlem Günü Kararları (V16.2)")
 st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
 # ============================================================
@@ -953,11 +951,11 @@ if sell_alerts or buy_alerts:
         if buy_alerts: st.dataframe(pd.DataFrame(buy_alerts), use_container_width=True, hide_index=True)
         else: st.success("Şu an teyitli 'Güçlü Al' fırsatı veren fon yok.")
 
-st.success(f"✅ V16.1 Analiz tamamlandı. Toplam {len(calc_funds)} fon işlendi.")
+st.success(f"✅ V16.2 Analiz tamamlandı. Toplam {len(calc_funds)} fon işlendi.")
 st.download_button(
-    label="📥 KAZRİSK V16.1 Excel İndir",
+    label="📥 KAZRİSK V16.2 Excel İndir",
     data=output,
-    file_name="fonlar_KGDM3_KAZRISK_FINAL_V16_1.xlsx",
+    file_name="fonlar_KGDM3_KAZRISK_FINAL_V16_2.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
 
