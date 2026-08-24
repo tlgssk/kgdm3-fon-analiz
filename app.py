@@ -1,3 +1,4 @@
+# V14.1 — Robust multi-source TEFAS / İş Yatırım data layer
 import concurrent.futures
 import datetime as dt
 import io
@@ -31,7 +32,7 @@ def new_init(self, *args, **kwargs):
 PatternFill.__init__ = new_init
 
 # ============================================================
-# tlgssk - SÜRÜM V14.0 (TAM & KARARLI SÜRÜM)
+# tlgssk - SÜRÜM V14.1 (TAM & KARARLI SÜRÜM)
 # ============================================================
 
 st.set_page_config(
@@ -42,7 +43,7 @@ st.set_page_config(
 
 st.title("📊 tlgssk Hibrit Fon Analizi")
 st.caption(
-    "TEFAS + İş Yatırım | Gemini 3.7 Sentiment (Toplu Sorgu) + Tam Senkron Tarihler | V14.0"
+    "TEFAS + İş Yatırım | Gemini 3.7 Sentiment (Toplu Sorgu) + Tam Senkron Tarihler | V14.1"
 )
 
 # ============================================================
@@ -159,7 +160,7 @@ api_key_input = st.sidebar.text_input(
     help="Google AI Studio API anahtarı. Boş bırakılırsa kural tabanlı duyarlılık çalışır.",
 )
 
-with st.sidebar.expander("⚖️ Skor Ağırlıkları (V14.0)"):
+with st.sidebar.expander("⚖️ Skor Ağırlıkları (V14.1)"):
     w_return = st.slider("Getiri ağırlığı", 0.0, 1.0, DEFAULT_MOMENTUM_WEIGHTS["return"], 0.05)
     w_sharpe = st.slider("Sharpe ağırlığı", 0.0, 1.0, DEFAULT_MOMENTUM_WEIGHTS["sharpe"], 0.05)
     w_cumulative = st.slider("Kümülatif ağırlığı", 0.0, 1.0, DEFAULT_MOMENTUM_WEIGHTS["cumulative"], 0.05)
@@ -440,6 +441,421 @@ def fetch_isyatirim_series(fund_code: str):
                 if len(df) >= 2: return df[["date", "price", "aum", "investors"]], status
         except: pass
     return None, status
+
+
+# ============================================================
+# V14.1 ROBUST DATA NORMALIZATION / FALLBACK HELPERS
+# ============================================================
+
+def normalize_fund_code(code):
+    """Normalize TEFAS/fund codes so whitespace/case/format differences
+    do not cause otherwise valid funds to be rejected."""
+    if code is None:
+        return ""
+    s = str(code).strip().upper()
+    s = re.sub(r"\s+", "", s)
+    if s.endswith(".0"):
+        s = s[:-2]
+    return s
+
+
+def _unwrap_records(obj):
+    """Accept common API response envelopes and return a list of records."""
+    if obj is None:
+        return []
+
+    if isinstance(obj, list):
+        return obj
+
+    if isinstance(obj, dict):
+        # Prefer common collection keys.
+        for key in (
+            "data", "Data", "value", "Value", "items", "Items",
+            "result", "Result", "results", "Results", "rows", "Rows",
+            "records", "Records"
+        ):
+            value = obj.get(key)
+            if isinstance(value, list):
+                return value
+            if isinstance(value, dict):
+                nested = _unwrap_records(value)
+                if nested:
+                    return nested
+
+        # Sometimes a single record is returned.
+        if any(k in obj for k in (
+            "TARIH", "Tarih", "date", "DATE",
+            "FIYAT", "Fiyat", "price", "PRICE"
+        )):
+            return [obj]
+
+    return []
+
+
+def _pick_field(record, candidates):
+    """Case-insensitive field lookup supporting Turkish/English variants."""
+    if not isinstance(record, dict):
+        return None
+
+    normalized = {
+        re.sub(r"[^a-z0-9çğıöşü]", "", str(k).lower()): v
+        for k, v in record.items()
+    }
+
+    for candidate in candidates:
+        nk = re.sub(r"[^a-z0-9çğıöşü]", "", candidate.lower())
+        if nk in normalized:
+            return normalized[nk]
+
+    # Last-resort contains match.
+    for k, v in normalized.items():
+        for candidate in candidates:
+            nk = re.sub(r"[^a-z0-9çğıöşü]", "", candidate.lower())
+            if nk and (nk in k or k in nk):
+                return v
+
+    return None
+
+
+def parse_fund_date(value):
+    """Parse date values from ISO, Turkish date strings and Unix timestamps."""
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return pd.NaT
+
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            x = float(value)
+            # Milliseconds / microseconds / seconds.
+            if x > 1e14:
+                return pd.to_datetime(x, unit="us", errors="coerce")
+            if x > 1e11:
+                return pd.to_datetime(x, unit="ms", errors="coerce")
+            if x > 1e9:
+                return pd.to_datetime(x, unit="s", errors="coerce")
+        except Exception:
+            pass
+
+    s = str(value).strip()
+    if not s:
+        return pd.NaT
+
+    for dayfirst in (False, True):
+        try:
+            dt = pd.to_datetime(s, errors="coerce", dayfirst=dayfirst)
+            if not pd.isna(dt):
+                return dt
+        except Exception:
+            pass
+
+    return pd.NaT
+
+
+def parse_price_value(value):
+    """Parse Turkish/European/English numeric representations robustly."""
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+
+    s = str(value).strip()
+    if not s:
+        return None
+
+    # Remove currency/other nonnumeric characters while preserving separators.
+    s = re.sub(r"[^0-9,.\-]", "", s)
+
+    if not s:
+        return None
+
+    # Turkish number: 1.234,567 -> 1234.567
+    if "," in s and "." in s:
+        if s.rfind(",") > s.rfind("."):
+            s = s.replace(".", "").replace(",", ".")
+        else:
+            s = s.replace(",", "")
+    elif "," in s:
+        # Decimal comma is the common TEFAS display convention.
+        s = s.replace(",", ".")
+    else:
+        # Plain decimal point.
+        pass
+
+    try:
+        x = float(s)
+        return x if math.isfinite(x) and x > 0 else None
+    except Exception:
+        return None
+
+
+def normalize_price_records(raw, requested_code=None):
+    """Convert heterogeneous source payloads into date/price rows."""
+    rows = []
+    code = normalize_fund_code(requested_code)
+
+    for rec in _unwrap_records(raw):
+        if not isinstance(rec, dict):
+            continue
+
+        date_value = _pick_field(rec, [
+            "TARIH", "Tarih", "tarih", "date", "DATE",
+            "fon_tarih", "FON_TARIH", "priceDate", "PriceDate"
+        ])
+        price_value = _pick_field(rec, [
+            "FIYAT", "Fiyat", "fiyat", "price", "PRICE",
+            "fon_fiyat", "FON_FIYAT", "unitPrice", "UnitPrice",
+            "NAV", "nav", "FonFiyat"
+        ])
+
+        dt = parse_fund_date(date_value)
+        price = parse_price_value(price_value)
+
+        if pd.isna(dt) or price is None:
+            continue
+
+        rows.append({
+            "date": pd.Timestamp(dt).normalize(),
+            "price": float(price),
+            "code": code
+        })
+
+    if not rows:
+        return pd.DataFrame(columns=["date", "price", "code"])
+
+    df = pd.DataFrame(rows)
+    df = df.dropna(subset=["date", "price"])
+    df = df[df["price"] > 0]
+    df = df.sort_values("date")
+    df = df.drop_duplicates(subset=["date"], keep="last")
+    return df.reset_index(drop=True)
+
+
+def merge_price_sources(*dfs):
+    """Merge multiple source series, preferring the first non-empty source
+    for duplicate dates while retaining coverage from fallback sources."""
+    valid = []
+    for df in dfs:
+        if df is None or df.empty:
+            continue
+        x = df.copy()
+        x["date"] = pd.to_datetime(x["date"], errors="coerce").dt.normalize()
+        x["price"] = pd.to_numeric(x["price"], errors="coerce")
+        x = x.dropna(subset=["date", "price"])
+        x = x[x["price"] > 0]
+        if not x.empty:
+            valid.append(x)
+
+    if not valid:
+        return pd.DataFrame(columns=["date", "price"])
+
+    pieces = []
+    occupied = set()
+
+    for df in valid:
+        for row in df.itertuples(index=False):
+            d = pd.Timestamp(row.date)
+            if d not in occupied:
+                pieces.append({"date": d, "price": float(row.price)})
+                occupied.add(d)
+
+    out = pd.DataFrame(pieces)
+    if out.empty:
+        return pd.DataFrame(columns=["date", "price"])
+
+    return out.sort_values("date").drop_duplicates("date").reset_index(drop=True)
+
+
+def price_series_quality(df, expected_days=None):
+    """Return a transparent quality/coverage diagnostic."""
+    if df is None or df.empty:
+        return {
+            "days": 0, "coverage": 0.0, "quality": 0.0,
+            "first_date": None, "last_date": None
+        }
+
+    x = df.sort_values("date").copy()
+    days = len(x)
+
+    if expected_days and expected_days > 0:
+        coverage = min(1.0, days / expected_days)
+    else:
+        coverage = 1.0
+
+    # Penalize non-positive/duplicate anomalies implicitly removed above.
+    quality = 100.0 * coverage
+
+    return {
+        "days": int(days),
+        "coverage": float(coverage),
+        "quality": float(max(0.0, min(100.0, quality))),
+        "first_date": x["date"].min(),
+        "last_date": x["date"].max(),
+    }
+
+
+def _extract_json_payload(response):
+    try:
+        return response.json()
+    except Exception:
+        try:
+            return json.loads(response.text)
+        except Exception:
+            return None
+
+
+def fetch_source_with_normalization(url, *, method="GET", params=None,
+                                    data=None, headers=None,
+                                    timeout=30, code=None):
+    """Generic robust HTTP fetcher for fallback endpoints."""
+    try:
+        response, status = request_with_status(
+            url,
+            method=method,
+            params=params,
+            data=data,
+            headers=headers,
+            timeout=timeout
+        )
+
+        if response is None:
+            return pd.DataFrame(columns=["date", "price"]), {
+                "ok": False, "status": status, "message": "No response"
+            }
+
+        payload = _extract_json_payload(response)
+        df = normalize_price_records(payload, code)
+
+        return df, {
+            "ok": not df.empty,
+            "status": status,
+            "message": "OK" if not df.empty else "Response received but no price rows parsed"
+        }
+    except Exception as exc:
+        return pd.DataFrame(columns=["date", "price"]), {
+            "ok": False, "status": None, "message": str(exc)
+        }
+
+
+def robust_fund_history(code, start_date, end_date, universe=None):
+    """
+    V14.1 source cascade:
+      1) TEFAS Direct
+      2) TEFAS Universe
+      3) Is Investment
+    Unlike V14.0, a failure in one source never prevents the next source.
+    Returns the best merged series plus detailed source diagnostics.
+    """
+    code = normalize_fund_code(code)
+    diagnostics = []
+
+    # 1) Existing TEFAS Direct function, if present.
+    try:
+        df1, stat1 = fetch_tefas_direct_api(code, start_date, end_date)
+        df1 = normalize_price_records(
+            df1.to_dict("records") if isinstance(df1, pd.DataFrame) else df1,
+            code
+        )
+        diagnostics.append({
+            "source": "TEFAS Direct",
+            "ok": not df1.empty,
+            "days": len(df1),
+            "detail": stat1
+        })
+    except Exception as exc:
+        df1 = pd.DataFrame(columns=["date", "price"])
+        diagnostics.append({
+            "source": "TEFAS Direct", "ok": False, "days": 0,
+            "detail": str(exc)
+        })
+
+    # 2) Universe source — always attempted independently.
+    df2 = pd.DataFrame(columns=["date", "price"])
+    try:
+        if universe is not None and not universe.empty:
+            u = universe.copy()
+
+            code_col = next(
+                (c for c in ["code", "FonKodu", "FONKODU", "fund_code", "FundCode"]
+                 if c in u.columns), None
+            )
+
+            if code_col:
+                mask = u[code_col].astype(str).map(normalize_fund_code).eq(code)
+                rows = u.loc[mask].copy()
+
+                if not rows.empty:
+                    # Normalize common universe column names.
+                    date_col = next(
+                        (c for c in ["date", "TARIH", "Tarih", "tarih"]
+                         if c in rows.columns), None
+                    )
+                    price_col = next(
+                        (c for c in ["price", "FIYAT", "Fiyat", "fiyat"]
+                         if c in rows.columns), None
+                    )
+
+                    if date_col and price_col:
+                        df2 = normalize_price_records(
+                            rows[[date_col, price_col]]
+                            .rename(columns={date_col: "date", price_col: "price"})
+                            .to_dict("records"),
+                            code
+                        )
+
+        diagnostics.append({
+            "source": "TEFAS Universe",
+            "ok": not df2.empty,
+            "days": len(df2),
+            "detail": "Universe parsed"
+        })
+    except Exception as exc:
+        diagnostics.append({
+            "source": "TEFAS Universe", "ok": False, "days": 0,
+            "detail": str(exc)
+        })
+
+    # 3) Existing İş Investment function, if present.
+    df3 = pd.DataFrame(columns=["date", "price"])
+    try:
+        df3, stat3 = fetch_isyatirim_history(code, start_date, end_date)
+        df3 = normalize_price_records(
+            df3.to_dict("records") if isinstance(df3, pd.DataFrame) else df3,
+            code
+        )
+        diagnostics.append({
+            "source": "İş Yatırım",
+            "ok": not df3.empty,
+            "days": len(df3),
+            "detail": stat3
+        })
+    except Exception as exc:
+        diagnostics.append({
+            "source": "İş Yatırım", "ok": False, "days": 0,
+            "detail": str(exc)
+        })
+
+    merged = merge_price_sources(df1, df2, df3)
+
+    if merged.empty:
+        source = "YOK"
+    elif not df1.empty:
+        source = "TEFAS Direct"
+        if len(merged) > len(df1):
+            source += " + fallback"
+    elif not df2.empty:
+        source = "TEFAS Universe"
+        if len(merged) > len(df2):
+            source += " + fallback"
+    else:
+        source = "İş Yatırım"
+
+    return merged, {
+        "source": source,
+        "diagnostics": diagnostics,
+        "days": len(merged),
+        "quality": price_series_quality(merged)
+    }
+
 
 def fetch_tefas_direct_api(fund_code: str, fund_kind: Optional[str] = None):
     code = normalize_fund_code(fund_code)
@@ -1185,7 +1601,7 @@ output = create_excel_output(wb, ws_list, eligible, common_n)
 # SKOR ÖZETLERİ VE EKRAN TABLOSU
 # ============================================================
 
-st.subheader("📈 KAZRİSK Portföy Özeti (V14.0)")
+st.subheader("📈 KAZRİSK Portföy Özeti (V14.1)")
 col1, col2, col3, col4 = st.columns(4)
 scores = [safe_float(x.get("decision_score")) for x in eligible if x.get("decision_score") is not None]
 if scores:
@@ -1256,7 +1672,7 @@ def color_cells(value):
 try: styled_df = df_display.style.map(color_cells)
 except AttributeError: styled_df = df_display.style.applymap(color_cells)
 
-st.subheader("📊 Analiz Sonuçları — Son 5 İşlem Günü Kararları (V14.0)")
+st.subheader("📊 Analiz Sonuçları — Son 5 İşlem Günü Kararları (V14.1)")
 st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
 # ============================================================
@@ -1277,9 +1693,9 @@ if sell_alerts or buy_alerts:
         if buy_alerts: st.dataframe(pd.DataFrame(buy_alerts), use_container_width=True, hide_index=True)
         else: st.success("Şu an teyitli 'Güçlü Al' fırsatı veren fon yok.")
 
-st.success(f"✅ V14.0 Analiz tamamlandı. Toplam {len(eligible)} fon işlendi.")
+st.success(f"✅ V14.1 Analiz tamamlandı. Toplam {len(eligible)} fon işlendi.")
 st.download_button(
-    label="📥 KAZRİSK V14.0 Excel İndir",
+    label="📥 KAZRİSK V14.1 Excel İndir",
     data=output,
     file_name="fonlar_KGDM3_KAZRISK_FINAL_V14_0.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
