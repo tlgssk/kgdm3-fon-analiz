@@ -1,5 +1,5 @@
 # ============================================================
-# tlgssk - SÜRÜM V14.4 (GÜÇLENDİRİLMİŞ VERİ ALMA VE HATA DÜZELTME)
+# tlgssk - SÜRÜM V14.4 (GITHUB + MANUEL + EXCEL GİRİŞLİ TAM SÜRÜM)
 # ============================================================
 
 import concurrent.futures
@@ -46,7 +46,7 @@ st.set_page_config(
 
 st.title("📊 tlgssk Hibrit Fon Analizi")
 st.caption(
-    "TEFAS + İş Yatırım | Gemini Sentiment + Çoklu Fon Girdi Motoru | V14.4 (Kararlı Sürüm)"
+    "TEFAS + İş Yatırım | Gemini Sentiment + GitHub Entegrasyonu | V14.4"
 )
 
 # ============================================================
@@ -58,7 +58,7 @@ TARGET_TRADING_DAYS = 10
 MIN_ROLLING_DAYS = 2
 
 HTTP_TIMEOUT = 15
-MAX_WORKERS = 3  # TEFAS IP bloklamasını önlemek için 3'e optimize edildi
+MAX_WORKERS = 3
 
 REQUEST_MAX_RETRIES = 3
 REQUEST_BACKOFF_FACTOR = 1.5
@@ -467,7 +467,7 @@ def compute_fund_metrics(series: pd.DataFrame, fund_code: str):
     }
 
 def fetch_and_compute_one_fund(code: str):
-    time.sleep(0.05)  # Hızlı ardışık sorguları ve TEFAS rate limit'i önlemek için mikro bekleme
+    time.sleep(0.05)
     series, source, statuses = get_fund_series(code)
     metrics = compute_fund_metrics(series, code)
     if metrics is None: return code, None, source, statuses
@@ -700,12 +700,45 @@ if "wb_bytes" not in st.session_state: st.session_state["wb_bytes"] = None
 st.markdown("### 📥 Veri Giriş Yöntemi Seçin")
 input_method = st.radio(
     "Veri Kaynağı:",
-    options=["✍️ Manuel Fon Girişi (+ / Virgül / Boşluk)", "📁 Bilgisayardan Excel Yükle"],
+    options=[
+        "🌐 GitHub'dan Otomatik Çek (Raw URL)",
+        "✍️ Manuel Fon Girişi (+ / Virgül / Boşluk)", 
+        "📁 Bilgisayardan Excel Yükle"
+    ],
     horizontal=True,
     label_visibility="collapsed"
 )
 
-if input_method == "✍️ Manuel Fon Girişi (+ / Virgül / Boşluk)":
+# 1. GITHUB'DAN DOSYA ÇEKME
+if input_method == "🌐 GitHub'dan Otomatik Çek (Raw URL)":
+    st.info("💡 GitHub reponuzdaki raw Excel dosya bağlantısını girerek otomatik analiz başlatabilirsiniz.")
+    default_gh_url = "https://raw.githubusercontent.com/tlgssk/kazrisk/main/fonlar.xlsx"
+    with st.form("github_entry_form"):
+        github_url = st.text_input("GitHub Raw Excel Bağlantısı:", value=default_gh_url)
+        if st.form_submit_button("🚀 GitHub Dosyasını İndir ve Analiz Et", type="primary", use_container_width=True):
+            try:
+                with st.spinner("📥 GitHub'dan dosya indiriliyor..."):
+                    res = HTTP.get(github_url.strip(), timeout=20)
+                    if res.status_code == 200:
+                        content = res.content
+                        temp_wb = openpyxl.load_workbook(io.BytesIO(content))
+                        ws_list = temp_wb["Fon_Listesi"] if "Fon_Listesi" in temp_wb.sheetnames else temp_wb.active
+                        codes = [normalize_fund_code(r[0].value) for r in ws_list.iter_rows(min_row=2) if r and r[0].value]
+                        codes = list(dict.fromkeys(filter(None, codes)))
+                        if codes:
+                            st.session_state["wb_bytes"] = content
+                            st.session_state["req_codes"] = codes
+                            st.success(f"✅ GitHub'dan {len(codes)} adet fon başarıyla yüklendi!")
+                            st.rerun()
+                        else:
+                            st.error("❌ GitHub dosyasında geçerli fon kodu bulunamadı.")
+                    else:
+                        st.error(f"❌ GitHub indirme hatası: HTTP {res.status_code}")
+            except Exception as exc:
+                st.error(f"❌ GitHub bağlantı hatası: {exc}")
+
+# 2. MANUEL GİRİŞ
+elif input_method == "✍️ Manuel Fon Girişi (+ / Virgül / Boşluk)":
     st.info("💡 Fon kodlarını aralarına `+`, `,` veya boşluk koyarak yazabilirsiniz (Örn: `THF + KZL + PNU + ICH + KHA`).")
     with st.form("manual_entry_form"):
         manual_input = st.text_area("Analiz Edilecek Fon Kodları", value="THF + KZL + PNU + ICH + KHA")
@@ -724,6 +757,7 @@ if input_method == "✍️ Manuel Fon Girişi (+ / Virgül / Boşluk)":
                 st.session_state["req_codes"] = codes
                 st.rerun()
 
+# 3. BİLGİSAYARDAN YÜKLEME
 elif input_method == "📁 Bilgisayardan Excel Yükle":
     uploaded_file = st.file_uploader("Bilgisayardan Excel Seçin (.xlsx)", type=["xlsx"])
     if uploaded_file is not None:
@@ -743,7 +777,7 @@ req_codes = st.session_state.get("req_codes", [])
 wb_bytes = st.session_state.get("wb_bytes")
 
 if not req_codes or not wb_bytes:
-    st.warning("⚠️ Lütfen analiz başlatmak için geçerli fon kodu girin veya dosya yükleyin.")
+    st.warning("⚠️ Lütfen analiz başlatmak için geçerli fon kodu girin, dosya yükleyin veya GitHub bağlantısı kullanın.")
     st.stop()
 
 wb = openpyxl.load_workbook(io.BytesIO(wb_bytes))
