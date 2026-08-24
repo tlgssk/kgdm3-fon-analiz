@@ -1,5 +1,5 @@
 # ============================================================
-# KGDM-3 & KAZRİSK - SÜRÜM V14.0 (ANTI-BOT & MULTI-CRAWLER SÜRÜMÜ)
+# KGDM-3 & KAZRİSK - SÜRÜM V14.1 (IMPORT HATASI GİDERİLMİŞ SÜRÜM)
 # ============================================================
 
 import concurrent.futures
@@ -21,6 +21,7 @@ import requests
 import urllib3
 import cloudscraper
 import streamlit as st  # <--- Eksik olan kritik kütüphane eklendi
+
 from openpyxl.formatting.rule import CellIsRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
@@ -56,7 +57,7 @@ PatternFill.__init__ = new_init
 
 st.set_page_config(page_title="KGDM-3 & KAZRİSK Hibrit Fon Analizi", page_icon="📊", layout="wide")
 st.title("📊 KGDM-3 & KAZRİSK Hibrit Fon Analizi")
-st.caption("TEFAS + Cloudscraper + İş Yatırım | Gemini SDK (google-genai) | V14.0 Anti-Bot")
+st.caption("TEFAS + Cloudscraper + İş Yatırım | Gemini SDK (google-genai) | V14.1 Anti-Bot")
 
 # ============================================================
 # AYARLAR VE SABİTLER
@@ -860,7 +861,7 @@ output = create_excel_output(wb, ws_list, eligible, common_n)
 # SKOR ÖZETLERİ VE EKRAN TABLOSU
 # ============================================================
 
-st.subheader("📈 KAZRİSK Portföy Özeti (V14.0)")
+st.subheader("📈 KAZRİSK Portföy Özeti (V14.1)")
 col1, col2, col3, col4 = st.columns(4)
 scores = [safe_float(x.get("decision_score")) for x in eligible if x.get("decision_score") is not None]
 if scores:
@@ -934,7 +935,7 @@ def color_cells(value):
 try: styled_df = df_display.style.map(color_cells)
 except AttributeError: styled_df = df_display.style.applymap(color_cells)
 
-st.subheader("📊 Analiz Sonuçları — Son 5 İşlem Günü Kararları (V14.0)")
+st.subheader("📊 Analiz Sonuçları — Son 5 İşlem Günü Kararları (V14.1)")
 st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
 # ============================================================
@@ -955,11 +956,11 @@ if sell_alerts or buy_alerts:
         if buy_alerts: st.dataframe(pd.DataFrame(buy_alerts), use_container_width=True, hide_index=True)
         else: st.success("Şu an teyitli 'Güçlü Al' fırsatı veren fon yok.")
 
-st.success(f"✅ V14.0 Analiz tamamlandı. Toplam {len(eligible)} fon işlendi.")
+st.success(f"✅ V14.1 Analiz tamamlandı. Toplam {len(eligible)} fon işlendi.")
 st.download_button(
-    label="📥 KAZRİSK V14.0 Excel İndir",
+    label="📥 KAZRİSK V14.1 Excel İndir",
     data=output,
-    file_name="fonlar_KGDM3_KAZRISK_FINAL_V14_0.xlsx",
+    file_name="fonlar_KGDM3_KAZRISK_FINAL_V14_1.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
 
