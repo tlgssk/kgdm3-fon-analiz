@@ -1,5 +1,5 @@
 # ============================================================
-# KGDM-3 & KAZRİSK - SÜRÜM V14.6 (KARARLI FİNAL SÜRÜMÜ)
+# KGDM-3 & KAZRİSK - SÜRÜM V14.7 (GEMINI MODEL AUTO-FALLBACK)
 # ============================================================
 
 import concurrent.futures
@@ -57,7 +57,7 @@ PatternFill.__init__ = new_init
 
 st.set_page_config(page_title="KGDM-3 & KAZRİSK Hibrit Fon Analizi", page_icon="📊", layout="wide")
 st.title("📊 KGDM-3 & KAZRİSK Hibrit Fon Analizi")
-st.caption("TEFAS + Cloudscraper + İş Yatırım | Gemini 1.5 Flash SDK | V14.6 Kararlı Sürüm")
+st.caption("TEFAS + Cloudscraper + İş Yatırım | Gemini Auto-Fallback SDK | V14.7")
 
 # ============================================================
 # AYARLAR VE SABİTLER
@@ -208,7 +208,7 @@ def zscore(values):
     return out
 
 # ============================================================
-# GEMINI 1.5 FLASH DUYARLILIK MOTORU
+# GEMINI OTOMATİK MODEL SEÇİMLİ (FALLBACK) DUYARLILIK MOTORU
 # ============================================================
 @st.cache_data(ttl=60 * 60 * 4, show_spinner=False)
 def fetch_batch_market_sentiment(areas: list, api_key: str) -> dict:
@@ -225,41 +225,46 @@ def fetch_batch_market_sentiment(areas: list, api_key: str) -> dict:
 SADECE geçerli bir JSON objesi üret: {{"Alan Adı": {{"score": 75, "label": "Kısa gerekçe"}}}}"""
 
     last_err = ""
-    target_model = 'gemini-1.5-flash'
+    # Denenecek model adayları sırasıyla test edilir (404 hatasını önlemek için)
+    candidate_models = ['gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-pro']
     
-    if HAS_GOOGLE_GENAI:
-        try:
-            client = genai.Client(api_key=api_key_clean)
-            response = client.models.generate_content(
-                model=target_model,
-                contents=prompt,
-                config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.2)
-            )
-            raw_text = response.text
-            parsed_data = json.loads(raw_text.strip("```json\n").strip("```").strip())
-            for area in areas:
-                if area in parsed_data:
-                    result_map[area] = {"score": int(clamp(safe_float(parsed_data[area].get("score", 50)), 0.0, 100.0)), "label": str(parsed_data[area].get("label", "Nötr")), "ai_active": True, "ai_reason": "google-genai (1.5-flash) Başarılı"}
-                else:
-                    result_map[area] = {"score": 50, "label": "Nötr", "ai_active": True, "ai_reason": "Alan bulunamadı"}
-            return result_map
-        except Exception as e:
-            last_err = f"genai hatası: {str(e)[:40]}"
-    
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{target_model}:generateContent?key={api_key_clean}"
-    try:
-        response = requests.post(url, headers={'Content-Type': 'application/json'}, json={"contents": [{"role": "user", "parts": [{"text": prompt}]}]}, timeout=15)
-        if response.status_code == 200:
-            raw_text = response.json().get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "{}")
-            parsed_data = json.loads(raw_text.strip("```json\n").strip("```").strip())
-            for area in areas:
-                if area in parsed_data:
-                    result_map[area] = {"score": int(clamp(safe_float(parsed_data[area].get("score", 50)), 0.0, 100.0)), "label": str(parsed_data[area].get("label", "Nötr")), "ai_active": True, "ai_reason": "Requests Fallback Başarılı"}
-                else: result_map[area] = {"score": 50, "label": "Nötr", "ai_active": True, "ai_reason": "Alan bulunamadı"}
-            return result_map
-    except Exception as exc: last_err += f" | req hatası: {str(exc)[:40]}"
+    parsed_data = None
+    success_model = ""
 
-    for area in areas: result_map[area] = {"score": 50, "label": "Nötr", "ai_active": False, "ai_reason": f"API Çöktü: {last_err}"}
+    if HAS_GOOGLE_GENAI:
+        client = genai.Client(api_key=api_key_clean)
+        for m in candidate_models:
+            try:
+                response = client.models.generate_content(
+                    model=m,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.2)
+                )
+                raw_text = response.text
+                parsed_data = json.loads(raw_text.strip("```json\n").strip("```").strip())
+                success_model = m
+                break
+            except Exception as e:
+                last_err = f"model {m} hatası: {str(e)[:30]}"
+                continue
+
+    if parsed_data:
+        for area in areas:
+            if area in parsed_data:
+                result_map[area] = {"score": int(clamp(safe_float(parsed_data[area].get("score", 50)), 0.0, 100.0)), "label": str(parsed_data[area].get("label", "Nötr")), "ai_active": True, "ai_reason": f"google-genai ({success_model}) Başarılı"}
+            else:
+                result_map[area] = {"score": 50, "label": "Nötr", "ai_active": True, "ai_reason": "Alan bulunamadı"}
+        return result_map
+
+    # İstekler başarısız olursa kural tabanlı varsayılan değerlere dön
+    for area in areas:
+        a_u = area.upper()
+        if "ALTIN" in a_u or "KIYMETLİ" in a_u: default_s, default_l = 82, "Güçlü Pozitif"
+        elif "PARA PİYASASI" in a_u: default_s, default_l = 65, "Pozitif"
+        elif "HİSSE" in a_u: default_s, default_l = 54, "Dengeli"
+        else: default_s, default_l = 50, "Nötr"
+
+        result_map[area] = {"score": default_s, "label": default_l, "ai_active": False, "ai_reason": f"API 404/Çöktü ({last_err})"}
     return result_map
 
 # ============================================================
@@ -864,7 +869,7 @@ if not eligible:
     st.error("❌ Veri hatları engellendiği (403/404) ve Smart Fallback devrede olmasına rağmen 5 günlük yeterli veri sağlanamadı.")
     st.stop()
 
-with st.spinner("📊 V14 Modeli (Gemini 2.5 Flash Sentiment + Multi-Crawler) Hesaplanıyor..."):
+with st.spinner("📊 V14 Modeli (Gemini 1.5 Flash Sentiment + Multi-Crawler) Hesaplanıyor..."):
     calculate_security_scores(eligible, ref)
     calculate_market_relative_momentum(eligible, ref, TARGET_TRADING_DAYS)
     
