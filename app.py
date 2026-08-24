@@ -1,5 +1,5 @@
 # ============================================================
-# KGDM-3 & KAZRİSK - SÜRÜM V14.7 (GEMINI MODEL AUTO-FALLBACK)
+# KGDM-3 & KAZRİSK - SÜRÜM V14.8 (GEMINI DİNAMİK MODEL KEŞFİ)
 # ============================================================
 
 import concurrent.futures
@@ -57,7 +57,7 @@ PatternFill.__init__ = new_init
 
 st.set_page_config(page_title="KGDM-3 & KAZRİSK Hibrit Fon Analizi", page_icon="📊", layout="wide")
 st.title("📊 KGDM-3 & KAZRİSK Hibrit Fon Analizi")
-st.caption("TEFAS + Cloudscraper + İş Yatırım | Gemini Auto-Fallback SDK | V14.7")
+st.caption("TEFAS + Cloudscraper + İş Yatırım | Gemini Dinamik Model Keşfi | V14.8")
 
 # ============================================================
 # AYARLAR VE SABİTLER
@@ -208,7 +208,7 @@ def zscore(values):
     return out
 
 # ============================================================
-# GEMINI OTOMATİK MODEL SEÇİMLİ (FALLBACK) DUYARLILIK MOTORU
+# GEMINI DİNAMİK MODEL KEŞİFLİ DUYARLILIK MOTORU (V14.8)
 # ============================================================
 @st.cache_data(ttl=60 * 60 * 4, show_spinner=False)
 def fetch_batch_market_sentiment(areas: list, api_key: str) -> dict:
@@ -225,46 +225,75 @@ def fetch_batch_market_sentiment(areas: list, api_key: str) -> dict:
 SADECE geçerli bir JSON objesi üret: {{"Alan Adı": {{"score": 75, "label": "Kısa gerekçe"}}}}"""
 
     last_err = ""
-    # Denenecek model adayları sırasıyla test edilir (404 hatasını önlemek için)
-    candidate_models = ['gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-pro']
-    
     parsed_data = None
-    success_model = ""
+    used_model = ""
 
+    # 1. Yöntem: google-genai kütüphanesi ile aktif modelleri listeleyip uygun olanı seçme
     if HAS_GOOGLE_GENAI:
-        client = genai.Client(api_key=api_key_clean)
-        for m in candidate_models:
+        try:
+            client = genai.Client(api_key=api_key_clean)
+            # API anahtarının erişebildiği modelleri tara
+            available_models = []
             try:
-                response = client.models.generate_content(
-                    model=m,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.2)
-                )
-                raw_text = response.text
-                parsed_data = json.loads(raw_text.strip("```json\n").strip("```").strip())
-                success_model = m
-                break
-            except Exception as e:
-                last_err = f"model {m} hatası: {str(e)[:30]}"
-                continue
+                for m in client.models.list():
+                    name = getattr(m, "name", str(m))
+                    if "flash" in name or "pro" in name:
+                        available_models.append(name.replace("models/", ""))
+            except:
+                pass
+            
+            # Eğer liste boşsa varsayılan adayları sırayla dene
+            if not available_models:
+                available_models = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro']
+
+            for m in available_models:
+                try:
+                    response = client.models.generate_content(
+                        model=m,
+                        contents=prompt,
+                        config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.2)
+                    )
+                    raw_text = response.text
+                    parsed_data = json.loads(raw_text.strip("```json\n").strip("```").strip())
+                    used_model = m
+                    break
+                except Exception as ex:
+                    last_err = f"{m}: {str(ex)[:30]}"
+                    continue
+        except Exception as e:
+            last_err = f"genai client hatası: {str(e)[:40]}"
+
+    # 2. Yöntem: Standart REST uç noktası fallback
+    if not parsed_data:
+        rest_candidates = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-pro']
+        for m in rest_candidates:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={api_key_clean}"
+            try:
+                response = requests.post(url, headers={'Content-Type': 'application/json'}, json={"contents": [{"role": "user", "parts": [{"text": prompt}]}]}, timeout=15)
+                if response.status_code == 200:
+                    raw_text = response.json().get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "{}")
+                    parsed_data = json.loads(raw_text.strip("```json\n").strip("```").strip())
+                    used_model = f"REST-{m}"
+                    break
+            except Exception as exc:
+                last_err = f"REST {m}: {str(exc)[:30]}"
 
     if parsed_data:
         for area in areas:
             if area in parsed_data:
-                result_map[area] = {"score": int(clamp(safe_float(parsed_data[area].get("score", 50)), 0.0, 100.0)), "label": str(parsed_data[area].get("label", "Nötr")), "ai_active": True, "ai_reason": f"google-genai ({success_model}) Başarılı"}
+                result_map[area] = {"score": int(clamp(safe_float(parsed_data[area].get("score", 50)), 0.0, 100.0)), "label": str(parsed_data[area].get("label", "Nötr")), "ai_active": True, "ai_reason": f"Başarılı ({used_model})"}
             else:
                 result_map[area] = {"score": 50, "label": "Nötr", "ai_active": True, "ai_reason": "Alan bulunamadı"}
         return result_map
 
-    # İstekler başarısız olursa kural tabanlı varsayılan değerlere dön
+    # Hiçbiri çalışmazsa akışın kesilmemesi için akıllı varsayılanlar atanır
     for area in areas:
         a_u = area.upper()
         if "ALTIN" in a_u or "KIYMETLİ" in a_u: default_s, default_l = 82, "Güçlü Pozitif"
         elif "PARA PİYASASI" in a_u: default_s, default_l = 65, "Pozitif"
         elif "HİSSE" in a_u: default_s, default_l = 54, "Dengeli"
         else: default_s, default_l = 50, "Nötr"
-
-        result_map[area] = {"score": default_s, "label": default_l, "ai_active": False, "ai_reason": f"API 404/Çöktü ({last_err})"}
+        result_map[area] = {"score": default_s, "label": default_l, "ai_active": False, "ai_reason": f"API 404/Bulunamadı ({last_err})"}
     return result_map
 
 # ============================================================
@@ -869,7 +898,7 @@ if not eligible:
     st.error("❌ Veri hatları engellendiği (403/404) ve Smart Fallback devrede olmasına rağmen 5 günlük yeterli veri sağlanamadı.")
     st.stop()
 
-with st.spinner("📊 V14 Modeli (Gemini 1.5 Flash Sentiment + Multi-Crawler) Hesaplanıyor..."):
+with st.spinner("📊 V14 Modeli (Gemini Dinamik Sentiment + Multi-Crawler) Hesaplanıyor..."):
     calculate_security_scores(eligible, ref)
     calculate_market_relative_momentum(eligible, ref, TARGET_TRADING_DAYS)
     
@@ -886,7 +915,7 @@ output = create_excel_output(wb, ws_list, eligible, common_n)
 # SKOR ÖZETLERİ VE EKRAN TABLOSU
 # ============================================================
 
-st.subheader("📈 KAZRİSK Portföy Özeti (V14.6)")
+st.subheader("📈 KAZRİSK Portföy Özeti (V14.7)")
 col1, col2, col3, col4 = st.columns(4)
 scores = [safe_float(x.get("decision_score")) for x in eligible if x.get("decision_score") is not None]
 if scores:
@@ -960,7 +989,7 @@ def color_cells(value):
 try: styled_df = df_display.style.map(color_cells)
 except AttributeError: styled_df = df_display.style.applymap(color_cells)
 
-st.subheader("📊 Analiz Sonuçları — Son 5 İşlem Günü Kararları (V14.6)")
+st.subheader("📊 Analiz Sonuçları — Son 5 İşlem Günü Kararları (V14.7)")
 st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
 # ============================================================
@@ -981,11 +1010,11 @@ if sell_alerts or buy_alerts:
         if buy_alerts: st.dataframe(pd.DataFrame(buy_alerts), use_container_width=True, hide_index=True)
         else: st.success("Şu an teyitli 'Güçlü Al' fırsatı veren fon yok.")
 
-st.success(f"✅ V14.6 Analiz tamamlandı. Toplam {len(eligible)} fon işlendi.")
+st.success(f"✅ V14.7 Analiz tamamlandı. Toplam {len(eligible)} fon işlendi.")
 st.download_button(
-    label="📥 KAZRİSK V14.6 Excel İndir",
+    label="📥 KAZRİSK V14.7 Excel İndir",
     data=output,
-    file_name="fonlar_KGDM3_KAZRISK_FINAL_V14_6.xlsx",
+    file_name="fonlar_KGDM3_KAZRISK_FINAL_V14_7.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
 
