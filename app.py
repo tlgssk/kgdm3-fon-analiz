@@ -1,5 +1,5 @@
 # ============================================================
-# KGDM-3 & KAZRİSK - SÜRÜM V14.8 (GEMINI DİNAMİK MODEL KEŞFİ)
+# KGDM-3 & KAZRİSK - SÜRÜM V15.6 (VADE STRATEJİSİ ENTEGRELİ)
 # ============================================================
 
 import concurrent.futures
@@ -57,7 +57,7 @@ PatternFill.__init__ = new_init
 
 st.set_page_config(page_title="KGDM-3 & KAZRİSK Hibrit Fon Analizi", page_icon="📊", layout="wide")
 st.title("📊 KGDM-3 & KAZRİSK Hibrit Fon Analizi")
-st.caption("TEFAS + Cloudscraper + İş Yatırım | Gemini Dinamik Model Keşfi | V14.8")
+st.caption("TEFAS + Cloudscraper + İş Yatırım | Dinamik Vade Stratejisi | V15.6")
 
 # ============================================================
 # AYARLAR VE SABİTLER
@@ -83,10 +83,6 @@ DEFAULT_MOMENTUM_WEIGHTS = {"return": 0.30, "sharpe": 0.25, "cumulative": 0.25, 
 SECURITY_WEIGHTS = {"aum": 0.30, "investor": 0.25, "concentration": 0.25, "liquidity": 0.20}
 SECURITY_SCALE = {"aum": 20.0, "investor": 20.0, "aum_flow": 8.0, "investor_change": 6.0, "concentration": 20.0}
 
-DEFAULT_HYBRID_MOMENTUM_WEIGHT = 0.50
-DEFAULT_HYBRID_SECURITY_WEIGHT = 0.35
-DEFAULT_HYBRID_SENTIMENT_WEIGHT = 0.15
-
 Z_LIMIT = 2.5
 STRONG_BUY = 75
 WATCH_LIST = 50
@@ -101,7 +97,7 @@ COLOR_NAVY, COLOR_GREEN, COLOR_RED, COLOR_YELLOW, COLOR_WHITE = "1F4E79", "00800
 COLOR_LIGHT_GREEN, COLOR_LIGHT_YELLOW, COLOR_LIGHT_RED = "E2F0D9", "FFF2CC", "FCE4D6"
 
 # ============================================================
-# SIDEBAR VE KULLANICI PARAMETRELERİ
+# SIDEBAR VE KULLANICI PARAMETRELERİ (VADE SEÇENEĞİ EKLENDİ)
 # ============================================================
 
 st.sidebar.header("⚙️ Analiz & Filtre Kriterleri")
@@ -114,7 +110,31 @@ except Exception: pass
 
 api_key_input = st.sidebar.text_input("🔑 Gemini API Key (Canlı Sentiment)", value=env_api_key, type="password")
 
-with st.sidebar.expander("⚖️ Skor Ağırlıkları"):
+st.sidebar.markdown("---")
+st.sidebar.markdown("🎯 **Yatırım Ufku (Vade Stratejisi)**")
+yatirim_vadesi = st.sidebar.radio(
+    "Vade Seçin",
+    ["Kısa Vade (1-3 Ay - Agresif)", "Orta Vade (3-12 Ay - Dengeli)", "Uzun Vade (1 Yıl+ - Güvenli/Risk Yönetimi)"],
+    index=1,
+    help="Seçtiğiniz vadeye göre hibrit skor ağırlıkları otomatik optimize edilir."
+)
+
+# Vadeye göre hibrit ağırlıkların dinamik ayarlanması
+if yatirim_vadesi.startswith("Kısa"):
+    HYBRID_MOMENTUM_WEIGHT = 0.65
+    HYBRID_SECURITY_WEIGHT = 0.25
+    HYBRID_SENTIMENT_WEIGHT = 0.10
+elif yatirim_vadesi.startswith("Uzun"):
+    HYBRID_MOMENTUM_WEIGHT = 0.30
+    HYBRID_SECURITY_WEIGHT = 0.55
+    HYBRID_SENTIMENT_WEIGHT = 0.15
+else:
+    # Orta Vade (Dengeli)
+    HYBRID_MOMENTUM_WEIGHT = 0.50
+    HYBRID_SECURITY_WEIGHT = 0.35
+    HYBRID_SENTIMENT_WEIGHT = 0.15
+
+with st.sidebar.expander("⚖️ Gelişmiş Skor Ağırlıkları (Opsiyonel)"):
     w_return = st.slider("Getiri ağırlığı", 0.0, 1.0, DEFAULT_MOMENTUM_WEIGHTS["return"], 0.05)
     w_sharpe = st.slider("Sharpe ağırlığı", 0.0, 1.0, DEFAULT_MOMENTUM_WEIGHTS["sharpe"], 0.05)
     w_cumulative = st.slider("Kümülatif ağırlığı", 0.0, 1.0, DEFAULT_MOMENTUM_WEIGHTS["cumulative"], 0.05)
@@ -122,15 +142,6 @@ with st.sidebar.expander("⚖️ Skor Ağırlıkları"):
     total_m = w_return + w_sharpe + w_cumulative + w_drawdown
     total_m = 1.0 if total_m <= 0 else total_m
     MOMENTUM_WEIGHTS = {"return": w_return / total_m, "sharpe": w_sharpe / total_m, "cumulative": w_cumulative / total_m, "drawdown": w_drawdown / total_m}
-
-    w_hybrid_mom = st.slider("Momentum Ağırlığı", 0.0, 1.0, DEFAULT_HYBRID_MOMENTUM_WEIGHT, 0.05)
-    w_hybrid_sec = st.slider("Güvenlik Ağırlığı", 0.0, 1.0, DEFAULT_HYBRID_SECURITY_WEIGHT, 0.05)
-    w_hybrid_sent = st.slider("Sentiment Ağırlığı", 0.0, 1.0, DEFAULT_HYBRID_SENTIMENT_WEIGHT, 0.05)
-    tot_h = w_hybrid_mom + w_hybrid_sec + w_hybrid_sent
-    if tot_h <= 0: tot_h = 1.0
-    HYBRID_MOMENTUM_WEIGHT = w_hybrid_mom / tot_h
-    HYBRID_SECURITY_WEIGHT = w_hybrid_sec / tot_h
-    HYBRID_SENTIMENT_WEIGHT = w_hybrid_sent / tot_h
 
 RISK_FREE_ANNUAL = st.sidebar.number_input("Yıllık risksiz getiri (%)", min_value=0.0, max_value=100.0, value=0.0, step=0.5)
 SHOW_DIAGNOSTICS = st.sidebar.checkbox("Kaynak tanılama bilgisini göster", value=True)
@@ -208,7 +219,7 @@ def zscore(values):
     return out
 
 # ============================================================
-# GEMINI DİNAMİK MODEL KEŞİFLİ DUYARLILIK MOTORU (V14.8)
+# GEMINI GÜVENLİ DUYARLILIK MOTORU (V15.6)
 # ============================================================
 @st.cache_data(ttl=60 * 60 * 4, show_spinner=False)
 def fetch_batch_market_sentiment(areas: list, api_key: str) -> dict:
@@ -226,74 +237,50 @@ SADECE geçerli bir JSON objesi üret: {{"Alan Adı": {{"score": 75, "label": "K
 
     last_err = ""
     parsed_data = None
-    used_model = ""
+    success_model = ""
 
-    # 1. Yöntem: google-genai kütüphanesi ile aktif modelleri listeleyip uygun olanı seçme
     if HAS_GOOGLE_GENAI:
         try:
             client = genai.Client(api_key=api_key_clean)
-            # API anahtarının erişebildiği modelleri tara
-            available_models = []
+            fallback_models = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-flash']
             try:
-                for m in client.models.list():
-                    name = getattr(m, "name", str(m))
-                    if "flash" in name or "pro" in name:
-                        available_models.append(name.replace("models/", ""))
-            except:
-                pass
-            
-            # Eğer liste boşsa varsayılan adayları sırayla dene
-            if not available_models:
-                available_models = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro']
+                for m_obj in client.models.list():
+                    m_name = getattr(m_obj, "name", str(m_obj)).replace("models/", "")
+                    if "flash" in m_name and m_name not in fallback_models:
+                        fallback_models.insert(0, m_name)
+            except: pass
 
-            for m in available_models:
+            for m in fallback_models:
                 try:
                     response = client.models.generate_content(
-                        model=m,
-                        contents=prompt,
+                        model=m, contents=prompt,
                         config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.2)
                     )
                     raw_text = response.text
                     parsed_data = json.loads(raw_text.strip("```json\n").strip("```").strip())
-                    used_model = m
+                    success_model = m
                     break
                 except Exception as ex:
-                    last_err = f"{m}: {str(ex)[:30]}"
+                    last_err = f"{m}: {str(ex)[:25]}"
                     continue
         except Exception as e:
-            last_err = f"genai client hatası: {str(e)[:40]}"
-
-    # 2. Yöntem: Standart REST uç noktası fallback
-    if not parsed_data:
-        rest_candidates = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-pro']
-        for m in rest_candidates:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={api_key_clean}"
-            try:
-                response = requests.post(url, headers={'Content-Type': 'application/json'}, json={"contents": [{"role": "user", "parts": [{"text": prompt}]}]}, timeout=15)
-                if response.status_code == 200:
-                    raw_text = response.json().get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "{}")
-                    parsed_data = json.loads(raw_text.strip("```json\n").strip("```").strip())
-                    used_model = f"REST-{m}"
-                    break
-            except Exception as exc:
-                last_err = f"REST {m}: {str(exc)[:30]}"
+            last_err = f"genai istemci: {str(e)[:30]}"
 
     if parsed_data:
         for area in areas:
             if area in parsed_data:
-                result_map[area] = {"score": int(clamp(safe_float(parsed_data[area].get("score", 50)), 0.0, 100.0)), "label": str(parsed_data[area].get("label", "Nötr")), "ai_active": True, "ai_reason": f"Başarılı ({used_model})"}
+                result_map[area] = {"score": int(clamp(safe_float(parsed_data[area].get("score", 50)), 0.0, 100.0)), "label": str(parsed_data[area].get("label", "Nötr")), "ai_active": True, "ai_reason": f"Başarılı ({success_model})"}
             else:
                 result_map[area] = {"score": 50, "label": "Nötr", "ai_active": True, "ai_reason": "Alan bulunamadı"}
         return result_map
 
-    # Hiçbiri çalışmazsa akışın kesilmemesi için akıllı varsayılanlar atanır
     for area in areas:
         a_u = area.upper()
         if "ALTIN" in a_u or "KIYMETLİ" in a_u: default_s, default_l = 82, "Güçlü Pozitif"
         elif "PARA PİYASASI" in a_u: default_s, default_l = 65, "Pozitif"
         elif "HİSSE" in a_u: default_s, default_l = 54, "Dengeli"
         else: default_s, default_l = 50, "Nötr"
-        result_map[area] = {"score": default_s, "label": default_l, "ai_active": False, "ai_reason": f"API 404/Bulunamadı ({last_err})"}
+        result_map[area] = {"score": default_s, "label": default_l, "ai_active": False, "ai_reason": f"Smart Fallback Aktif ({last_err})"}
     return result_map
 
 # ============================================================
@@ -898,7 +885,7 @@ if not eligible:
     st.error("❌ Veri hatları engellendiği (403/404) ve Smart Fallback devrede olmasına rağmen 5 günlük yeterli veri sağlanamadı.")
     st.stop()
 
-with st.spinner("📊 V14 Modeli (Gemini Dinamik Sentiment + Multi-Crawler) Hesaplanıyor..."):
+with st.spinner("📊 V15 Modeli (Gemini SDK + Vade Optimizasyonu) Hesaplanıyor..."):
     calculate_security_scores(eligible, ref)
     calculate_market_relative_momentum(eligible, ref, TARGET_TRADING_DAYS)
     
@@ -915,7 +902,7 @@ output = create_excel_output(wb, ws_list, eligible, common_n)
 # SKOR ÖZETLERİ VE EKRAN TABLOSU
 # ============================================================
 
-st.subheader("📈 KAZRİSK Portföy Özeti (V14.7)")
+st.subheader(f"📈 KAZRİSK Portföy Özeti ({yatirim_vadesi.split(' ')[0]} Stratejisi)")
 col1, col2, col3, col4 = st.columns(4)
 scores = [safe_float(x.get("decision_score")) for x in eligible if x.get("decision_score") is not None]
 if scores:
@@ -989,7 +976,7 @@ def color_cells(value):
 try: styled_df = df_display.style.map(color_cells)
 except AttributeError: styled_df = df_display.style.applymap(color_cells)
 
-st.subheader("📊 Analiz Sonuçları — Son 5 İşlem Günü Kararları (V14.7)")
+st.subheader("📊 Analiz Sonuçları — Son 5 İşlem Günü Kararları (V15.6)")
 st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
 # ============================================================
@@ -1010,11 +997,11 @@ if sell_alerts or buy_alerts:
         if buy_alerts: st.dataframe(pd.DataFrame(buy_alerts), use_container_width=True, hide_index=True)
         else: st.success("Şu an teyitli 'Güçlü Al' fırsatı veren fon yok.")
 
-st.success(f"✅ V14.7 Analiz tamamlandı. Toplam {len(eligible)} fon işlendi.")
+st.success(f"✅ V15.6 Analiz tamamlandı. Toplam {len(eligible)} fon işlendi.")
 st.download_button(
-    label="📥 KAZRİSK V14.7 Excel İndir",
+    label="📥 KAZRİSK V15.6 Excel İndir",
     data=output,
-    file_name="fonlar_KGDM3_KAZRISK_FINAL_V14_7.xlsx",
+    file_name="fonlar_KGDM3_KAZRISK_FINAL_V15_6.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
 
