@@ -1,5 +1,5 @@
 # ============================================================
-# tlgssk - SÜRÜM V14.3 (TAM DÜZELTİLMİŞ KARARLI SÜRÜM)
+# tlgssk - SÜRÜM V14.4 (GÜÇLENDİRİLMİŞ VERİ ALMA VE HATA DÜZELTME)
 # ============================================================
 
 import concurrent.futures
@@ -46,7 +46,7 @@ st.set_page_config(
 
 st.title("📊 tlgssk Hibrit Fon Analizi")
 st.caption(
-    "TEFAS + İş Yatırım | Gemini Sentiment + Çoklu Fon Girdi Motoru | V14.3"
+    "TEFAS + İş Yatırım | Gemini Sentiment + Çoklu Fon Girdi Motoru | V14.4 (Kararlı Sürüm)"
 )
 
 # ============================================================
@@ -57,11 +57,11 @@ LOOKBACK_CALENDAR_DAYS = 60
 TARGET_TRADING_DAYS = 10
 MIN_ROLLING_DAYS = 2
 
-HTTP_TIMEOUT = 12
-MAX_WORKERS = 4
+HTTP_TIMEOUT = 15
+MAX_WORKERS = 3  # TEFAS IP bloklamasını önlemek için 3'e optimize edildi
 
-REQUEST_MAX_RETRIES = 2
-REQUEST_BACKOFF_FACTOR = 1.0
+REQUEST_MAX_RETRIES = 3
+REQUEST_BACKOFF_FACTOR = 1.5
 
 DEFAULT_MOMENTUM_WEIGHTS = {"return": 0.30, "sharpe": 0.25, "cumulative": 0.25, "drawdown": 0.20}
 SECURITY_WEIGHTS = {"aum": 0.30, "investor": 0.25, "concentration": 0.25, "liquidity": 0.20}
@@ -70,7 +70,6 @@ DEFAULT_HYBRID_MOMENTUM_WEIGHT = 0.50
 DEFAULT_HYBRID_SECURITY_WEIGHT = 0.35
 DEFAULT_HYBRID_SENTIMENT_WEIGHT = 0.15
 
-Z_LIMIT = 2.5
 STRONG_BUY = 75
 WATCH_LIST = 50
 CORRECTION = 35
@@ -79,7 +78,7 @@ COLOR_NAVY, COLOR_GREEN, COLOR_RED, COLOR_YELLOW, COLOR_WHITE = "1F4E79", "00800
 COLOR_LIGHT_GREEN, COLOR_LIGHT_YELLOW, COLOR_LIGHT_RED = "E2F0D9", "FFF2CC", "FCE4D6"
 
 # ============================================================
-# HTTP OTURUMU
+# HTTP OTURUMU & GÜÇLENDİRİLMİŞ HEADERS
 # ============================================================
 
 def build_http_session() -> requests.Session:
@@ -93,7 +92,7 @@ def build_http_session() -> requests.Session:
         status_forcelist=(429, 500, 502, 503, 504),
         allowed_methods=frozenset({"GET", "POST"})
     )
-    adapter = HTTPAdapter(max_retries=retry, pool_connections=10, pool_maxsize=10)
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=15, pool_maxsize=15)
     session.mount("https://", adapter)
     session.mount("http://", adapter)
     return session
@@ -257,11 +256,11 @@ def fetch_batch_market_sentiment(areas: list, api_key: str) -> dict:
         return result_map
 
     areas_text = "\n".join([f"- {a}" for a in areas])
-    prompt = f"""Sen kıdemli bir fon yöneticisi ve analistsin. Aşağıdaki fon yatırım alanları için 0-100 arası duyarlılık puanı ve max 6 kelimelik gerekçe üret:
+    prompt = f"""Sen kıdemli bir fon analistisin. Aşağıdaki fon yatırım alanları için 0-100 arası duyarlılık puanı ve max 6 kelimelik gerekçe üret:
 {areas_text}
 SADECE geçerli JSON objesi üret: {{"Alan Adı": {{"score": 75, "label": "Kısa gerekçe"}}}}"""
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.7-flash:generateContent?key={api_key_clean}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key_clean}"
     headers = {'Content-Type': 'application/json'}
     payload = {
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
@@ -308,7 +307,8 @@ def fetch_tefas_direct_api(fund_code: str):
         "Referer": "https://www.tefas.gov.tr/TarihselVeriler.aspx",
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
         "X-Requested-With": "XMLHttpRequest",
-        "Accept": "application/json, text/javascript, */*; q=0.01"
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Connection": "keep-alive"
     }
     
     kinds = ["YAT", "EMK", "BYF", ""]
@@ -323,7 +323,8 @@ def fetch_tefas_direct_api(fund_code: str):
             res = HTTP.post(url, data=payload, headers=headers, timeout=HTTP_TIMEOUT)
             status["status_code"] = res.status_code
             if res.status_code == 200:
-                raw = res.json().get("data", [])
+                resp_json = res.json()
+                raw = resp_json.get("data", []) if isinstance(resp_json, dict) else []
                 if raw and len(raw) >= 2:
                     df = pd.DataFrame(raw)
                     df["date"] = pd.to_datetime(df["TARIH"], unit="ms", errors="coerce")
@@ -350,7 +351,8 @@ def fetch_isyatirim_series(fund_code: str):
     params = {"fonKod": code, "baslangic": start.strftime("%d-%m-%Y"), "bitis": end.strftime("%d-%m-%Y")}
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept": "application/json"
+        "Accept": "application/json",
+        "X-Requested-With": "XMLHttpRequest"
     }
     try:
         res = HTTP.get(url, params=params, headers=headers, timeout=HTTP_TIMEOUT)
@@ -394,15 +396,16 @@ def fetch_fund_structural_data(fund_code: str) -> dict:
     code = normalize_fund_code(fund_code)
     structural = {"top_asset_weight": None, "asset_class_hhi": None, "is_bist30": False, "investment_area": "Karma / Değişken"}
     
-    # Bilinen ana fon türleri
-    if code in ["YAY", "AFT", "AFA", "TTE"]:
+    if code in ["YAY", "AFT", "AFA", "TTE", "GUH", "ITP"]:
         structural["investment_area"] = "Hisse Senedi (Yabancı Teknoloji)"
-    elif code in ["KZL", "GUM", "GGK"]:
+    elif code in ["KZL", "GUM", "GGK", "KGM", "KUT", "AFO"]:
         structural["investment_area"] = "Kıymetli Maden"
-    elif code in ["PPZ", "NVB", "NRC"]:
+    elif code in ["PPZ", "NVB", "NRC", "PNU", "TP2", "FIL"]:
         structural["investment_area"] = "Para Piyasası"
-    elif code in ["MAC", "TI3", "TCD", "BIO"]:
+    elif code in ["MAC", "TI3", "TCD", "BIO", "THF", "KHA", "PUK", "AK3"]:
         structural["investment_area"] = "Hisse Senedi"
+    elif code in ["DBH", "YBE", "AKE", "FUB"]:
+        structural["investment_area"] = "Borçlanma Araçları"
 
     return structural
 
@@ -464,6 +467,7 @@ def compute_fund_metrics(series: pd.DataFrame, fund_code: str):
     }
 
 def fetch_and_compute_one_fund(code: str):
+    time.sleep(0.05)  # Hızlı ardışık sorguları ve TEFAS rate limit'i önlemek için mikro bekleme
     series, source, statuses = get_fund_series(code)
     metrics = compute_fund_metrics(series, code)
     if metrics is None: return code, None, source, statuses
@@ -702,9 +706,9 @@ input_method = st.radio(
 )
 
 if input_method == "✍️ Manuel Fon Girişi (+ / Virgül / Boşluk)":
-    st.info("💡 Fon kodlarını aralarına `+`, `,` veya boşluk koyarak yazabilirsiniz (Örn: `YAY` veya `TI3 + MAC + TCD + BIO + YAY`).")
+    st.info("💡 Fon kodlarını aralarına `+`, `,` veya boşluk koyarak yazabilirsiniz (Örn: `THF + KZL + PNU + ICH + KHA`).")
     with st.form("manual_entry_form"):
-        manual_input = st.text_area("Analiz Edilecek Fon Kodları", value="YAY")
+        manual_input = st.text_area("Analiz Edilecek Fon Kodları", value="THF + KZL + PNU + ICH + KHA")
         if st.form_submit_button("🚀 Manuel Listeyi Analiz Et", type="primary", use_container_width=True):
             raw_tokens = re.split(r"[\s\+\,\;\-]+", manual_input.strip())
             codes = [normalize_fund_code(t) for t in raw_tokens if t.strip()]
@@ -789,7 +793,7 @@ output = create_excel_output(wb, calc_funds, common_n)
 # SKOR ÖZETLERİ VE EKRAN TABLOSU
 # ============================================================
 
-st.subheader("📈 KAZRİSK Portföy Özeti (V14.3)")
+st.subheader("📈 KAZRİSK Portföy Özeti (V14.4)")
 col1, col2, col3, col4 = st.columns(4)
 scores = [safe_float(x.get("decision_score")) for x in calc_funds if x.get("decision_score") is not None]
 if scores:
@@ -857,7 +861,7 @@ def color_cells(value):
 try: styled_df = df_display.style.map(color_cells)
 except AttributeError: styled_df = df_display.style.applymap(color_cells)
 
-st.subheader("📊 Analiz Sonuçları — Son 5 İşlem Günü Kararları (V14.3)")
+st.subheader("📊 Analiz Sonuçları — Son 5 İşlem Günü Kararları (V14.4)")
 st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
 # ============================================================
@@ -878,11 +882,11 @@ if sell_alerts or buy_alerts:
         if buy_alerts: st.dataframe(pd.DataFrame(buy_alerts), use_container_width=True, hide_index=True)
         else: st.success("Şu an teyitli 'Güçlü Al' fırsatı veren fon yok.")
 
-st.success(f"✅ V14.3 Analiz tamamlandı. Toplam {len(calc_funds)} fon işlendi.")
+st.success(f"✅ V14.4 Analiz tamamlandı. Toplam {len(calc_funds)} fon işlendi.")
 st.download_button(
-    label="📥 KAZRİSK V14.3 Excel İndir",
+    label="📥 KAZRİSK V14.4 Excel İndir",
     data=output,
-    file_name="fonlar_KGDM3_KAZRISK_FINAL_V14_3.xlsx",
+    file_name="fonlar_KGDM3_KAZRISK_FINAL_V14_4.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
 
