@@ -1,5 +1,5 @@
 # ============================================================
-# KGDM-3 & KAZRİSK - SÜRÜM V14.5 (GOOGLE-GENAI & ANTI-BOT TAM SÜRÜM)
+# KGDM-3 & KAZRİSK - SÜRÜM V14.6 (KARARLI FİNAL SÜRÜMÜ)
 # ============================================================
 
 import concurrent.futures
@@ -57,7 +57,7 @@ PatternFill.__init__ = new_init
 
 st.set_page_config(page_title="KGDM-3 & KAZRİSK Hibrit Fon Analizi", page_icon="📊", layout="wide")
 st.title("📊 KGDM-3 & KAZRİSK Hibrit Fon Analizi")
-st.caption("TEFAS + Cloudscraper + İş Yatırım | Gemini 2.5 Flash SDK | V14.5 Kararlı Sürüm")
+st.caption("TEFAS + Cloudscraper + İş Yatırım | Gemini 1.5 Flash SDK | V14.6 Kararlı Sürüm")
 
 # ============================================================
 # AYARLAR VE SABİTLER
@@ -208,7 +208,7 @@ def zscore(values):
     return out
 
 # ============================================================
-# GÜNCEL GEMINI SDK DUYARLILIK MOTORU (gemini-2.5-flash)
+# GEMINI 1.5 FLASH DUYARLILIK MOTORU
 # ============================================================
 @st.cache_data(ttl=60 * 60 * 4, show_spinner=False)
 def fetch_batch_market_sentiment(areas: list, api_key: str) -> dict:
@@ -225,9 +225,8 @@ def fetch_batch_market_sentiment(areas: list, api_key: str) -> dict:
 SADECE geçerli bir JSON objesi üret: {{"Alan Adı": {{"score": 75, "label": "Kısa gerekçe"}}}}"""
 
     last_err = ""
-    target_model = 'gemini-2.5-flash'
+    target_model = 'gemini-1.5-flash'
     
-    # Yeni google-genai kütüphanesi entegrasyonu
     if HAS_GOOGLE_GENAI:
         try:
             client = genai.Client(api_key=api_key_clean)
@@ -240,14 +239,13 @@ SADECE geçerli bir JSON objesi üret: {{"Alan Adı": {{"score": 75, "label": "K
             parsed_data = json.loads(raw_text.strip("```json\n").strip("```").strip())
             for area in areas:
                 if area in parsed_data:
-                    result_map[area] = {"score": int(clamp(safe_float(parsed_data[area].get("score", 50)), 0.0, 100.0)), "label": str(parsed_data[area].get("label", "Nötr")), "ai_active": True, "ai_reason": "google-genai (2.5-flash) Başarılı"}
+                    result_map[area] = {"score": int(clamp(safe_float(parsed_data[area].get("score", 50)), 0.0, 100.0)), "label": str(parsed_data[area].get("label", "Nötr")), "ai_active": True, "ai_reason": "google-genai (1.5-flash) Başarılı"}
                 else:
                     result_map[area] = {"score": 50, "label": "Nötr", "ai_active": True, "ai_reason": "Alan bulunamadı"}
             return result_map
         except Exception as e:
             last_err = f"genai hatası: {str(e)[:40]}"
     
-    # Fallback olarak REST API çağrısı
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{target_model}:generateContent?key={api_key_clean}"
     try:
         response = requests.post(url, headers={'Content-Type': 'application/json'}, json={"contents": [{"role": "user", "parts": [{"text": prompt}]}]}, timeout=15)
@@ -336,7 +334,6 @@ def fetch_tier3_isyatirim(code: str, start, end):
     params = {"fonKod": code, "baslangic": start.strftime("%d-%m-%Y"), "bitis": end.strftime("%d-%m-%Y")}
     try:
         session = requests.Session()
-        # Oturum çerezini almak için önce ana sayfaya el sıkışma isteği atılır (401 hatasını önler)
         try:
             session.get("https://www.isyatirim.com.tr/tr-tr/analiz/fonlar/Sayfalar/default.aspx", headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
         except: pass
@@ -884,7 +881,7 @@ output = create_excel_output(wb, ws_list, eligible, common_n)
 # SKOR ÖZETLERİ VE EKRAN TABLOSU
 # ============================================================
 
-st.subheader("📈 KAZRİSK Portföy Özeti (V14.5)")
+st.subheader("📈 KAZRİSK Portföy Özeti (V14.6)")
 col1, col2, col3, col4 = st.columns(4)
 scores = [safe_float(x.get("decision_score")) for x in eligible if x.get("decision_score") is not None]
 if scores:
@@ -958,7 +955,7 @@ def color_cells(value):
 try: styled_df = df_display.style.map(color_cells)
 except AttributeError: styled_df = df_display.style.applymap(color_cells)
 
-st.subheader("📊 Analiz Sonuçları — Son 5 İşlem Günü Kararları (V14.5)")
+st.subheader("📊 Analiz Sonuçları — Son 5 İşlem Günü Kararları (V14.6)")
 st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
 # ============================================================
@@ -979,11 +976,11 @@ if sell_alerts or buy_alerts:
         if buy_alerts: st.dataframe(pd.DataFrame(buy_alerts), use_container_width=True, hide_index=True)
         else: st.success("Şu an teyitli 'Güçlü Al' fırsatı veren fon yok.")
 
-st.success(f"✅ V14.5 Analiz tamamlandı. Toplam {len(eligible)} fon işlendi.")
+st.success(f"✅ V14.6 Analiz tamamlandı. Toplam {len(eligible)} fon işlendi.")
 st.download_button(
-    label="📥 KAZRİSK V14.5 Excel İndir",
+    label="📥 KAZRİSK V14.6 Excel İndir",
     data=output,
-    file_name="fonlar_KGDM3_KAZRISK_FINAL_V14_5.xlsx",
+    file_name="fonlar_KGDM3_KAZRISK_FINAL_V14_6.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
 
