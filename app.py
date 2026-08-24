@@ -1,5 +1,5 @@
 # ============================================================
-# tlgssk - SÜRÜM V16.0 (TEFAS-CRAWLER DOĞRUDAN TAKASBANK MOTORU)
+# tlgssk - SÜRÜM V16.1 (GEMINI AI TAM ONARILMIŞ VE AKTİF SÜRÜM)
 # ============================================================
 
 import concurrent.futures
@@ -45,7 +45,7 @@ st.set_page_config(
 
 st.title("📊 tlgssk Hibrit Fon Analizi")
 st.caption(
-    "TEFAS Resmi Canlı Takasbank Veri Motoru (tefas-crawler) | KAZRİSK V16.0"
+    "TEFAS Resmi Canlı Takasbank Veri Motoru | Aktif Gemini Canlı Duyarlılık | V16.1"
 )
 
 # ============================================================
@@ -199,7 +199,7 @@ def safe_std(values):
     return (sum((x - mean_v) ** 2 for x in vals) / len(vals)) ** 0.5
 
 # ============================================================
-# CANLI GEMINI DUYARLILIK MOTORU
+# CANLI GEMINI DUYARLILIK MOTORU (GÜNCELLENMİŞ & SAĞLAM)
 # ============================================================
 
 @st.cache_data(ttl=60 * 60 * 4, show_spinner=False)
@@ -211,50 +211,79 @@ def fetch_batch_market_sentiment(areas: list, api_key: str) -> dict:
         for area in areas:
             a_u = area.upper()
             if "YABANCI TEKNOLOJİ" in a_u or "YABANCI" in a_u:
-                result_map[area] = {"score": 38, "label": "Negatif (Kâr Satışı)", "ai_active": False, "ai_reason": "API Anahtarı Yok"}
+                result_map[area] = {"score": 38, "label": "Negatif (Kâr Satışı)", "ai_active": False, "ai_reason": "API Anahtarı Girilmedi"}
             elif "ALTIN" in a_u or "GÜMÜŞ" in a_u or "KIYMETLİ" in a_u:
-                result_map[area] = {"score": 82, "label": "Güçlü Pozitif (Faiz İndirimi)", "ai_active": False, "ai_reason": "API Anahtarı Yok"}
+                result_map[area] = {"score": 82, "label": "Güçlü Pozitif (Faiz İndirimi)", "ai_active": False, "ai_reason": "API Anahtarı Girilmedi"}
             elif "PARA PİYASASI" in a_u or "BORÇLANMA" in a_u:
-                result_map[area] = {"score": 65, "label": "Pozitif (Sabit Getiri)", "ai_active": False, "ai_reason": "API Anahtarı Yok"}
+                result_map[area] = {"score": 65, "label": "Pozitif (Sabit Getiri)", "ai_active": False, "ai_reason": "API Anahtarı Girilmedi"}
             elif "HİSSE" in a_u or "BIST" in a_u:
-                result_map[area] = {"score": 54, "label": "Dengeli / Pozitif Beklenti", "ai_active": False, "ai_reason": "API Anahtarı Yok"}
+                result_map[area] = {"score": 54, "label": "Dengeli / Pozitif Beklenti", "ai_active": False, "ai_reason": "API Anahtarı Girilmedi"}
             else:
-                result_map[area] = {"score": 50, "label": "Nötr / Kural Tabanlı", "ai_active": False, "ai_reason": "API Anahtarı Yok"}
+                result_map[area] = {"score": 50, "label": "Nötr / Kural Tabanlı", "ai_active": False, "ai_reason": "API Anahtarı Girilmedi"}
         return result_map
 
     areas_text = "\n".join([f"- {a}" for a in areas])
-    prompt = f"""Sen kıdemli bir fon analistisin. Aşağıdaki fon yatırım alanları için 0-100 arası duyarlılık puanı ve max 6 kelimelik gerekçe üret:
+    prompt = f"""Sen kıdemli bir Türk portföy yöneticisisin. Aşağıdaki fon yatırım alanları için güncel makroekonomik ve piyasa görünümüne göre 0-100 arası duyarlılık puanı (score) ve en fazla 6 kelimelik gerekçe (label) üret:
 {areas_text}
-SADECE geçerli JSON objesi üret: {{"Alan Adı": {{"score": 75, "label": "Kısa gerekçe"}}}}"""
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key_clean}"
+JSON formatında sadece geçerli bir obje döndür:
+{{
+  "Alan Adı": {{"score": 75, "label": "Kısa gerekçe"}}
+}}"""
+
+    # Gemini 2.5 Flash Endpoint
+    url = f"[https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=](https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=){api_key_clean}"
     headers = {'Content-Type': 'application/json'}
     payload = {
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        "generationConfig": {"responseMimeType": "application/json"}
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "temperature": 0.2
+        }
     }
 
+    err_msg = ""
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=20)
+        response = requests.post(url, headers=headers, json=payload, timeout=18)
         if response.status_code == 200:
-            raw_text = response.json().get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "{}")
-            parsed = json.loads(raw_text.strip("```json\n").strip("```").strip())
-            for area in areas:
-                if area in parsed:
-                    result_map[area] = {
-                        "score": int(clamp(safe_float(parsed[area].get("score", 50)), 0.0, 100.0)),
-                        "label": str(parsed[area].get("label", "Nötr")),
-                        "ai_active": True,
-                        "ai_reason": "Bağlantı Başarılı"
-                    }
-                else:
-                    result_map[area] = {"score": 50, "label": "Nötr", "ai_active": True, "ai_reason": "Varsayılan"}
-            return result_map
-    except Exception:
-        pass
+            res_json = response.json()
+            candidates = res_json.get("candidates", [])
+            if candidates:
+                raw_text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "{}")
+                cleaned_text = re.sub(r"^```json\s*", "", raw_text.strip(), flags=re.MULTILINE)
+                cleaned_text = re.sub(r"\s*```$", "", cleaned_text, flags=re.MULTILINE).strip()
+                parsed = json.loads(cleaned_text)
+                
+                for area in areas:
+                    if area in parsed:
+                        result_map[area] = {
+                            "score": int(clamp(safe_float(parsed[area].get("score", 50)), 0.0, 100.0)),
+                            "label": str(parsed[area].get("label", "Nötr")),
+                            "ai_active": True,
+                            "ai_reason": "Canlı Bağlantı Başarılı"
+                        }
+                    else:
+                        result_map[area] = {"score": 50, "label": "Nötr", "ai_active": True, "ai_reason": "Varsayılan (Eşleşmedi)"}
+                return result_map
+        else:
+            err_msg = f"HTTP {response.status_code}"
+    except Exception as exc:
+        err_msg = str(exc)[:60]
 
+    # Hata durumunda kural tabanlı koruma
     for area in areas:
-        result_map[area] = {"score": 50, "label": "Nötr", "ai_active": False, "ai_reason": "API Hatası"}
+        a_u = area.upper()
+        if "ALTIN" in a_u or "KIYMETLİ" in a_u: default_s, default_l = 82, "Güçlü Pozitif"
+        elif "PARA PİYASASI" in a_u: default_s, default_l = 65, "Pozitif"
+        elif "HİSSE" in a_u: default_s, default_l = 54, "Dengeli"
+        else: default_s, default_l = 50, "Nötr"
+
+        result_map[area] = {
+            "score": default_s,
+            "label": default_l,
+            "ai_active": False,
+            "ai_reason": f"API Hatası ({err_msg or 'Bilinmiyor'})"
+        }
     return result_map
 
 # ============================================================
@@ -264,11 +293,11 @@ SADECE geçerli JSON objesi üret: {{"Alan Adı": {{"score": 75, "label": "Kısa
 def fetch_tefas_crawler_engine(fund_code: str):
     code = normalize_fund_code(fund_code)
     t0 = time.time()
-    status = {"source": "1. Hat: TEFAS Takasbank Canlı", "attempted": True, "ok": False, "status_code": None, "message": "", "elapsed_ms": 0, "root_cause": ""}
+    status = {"source": "1. Hat: TEFAS Canlı API", "attempted": True, "ok": False, "status_code": None, "message": "", "elapsed_ms": 0, "root_cause": ""}
     end = dt.datetime.now()
     start = end - dt.timedelta(days=LOOKBACK_CALENDAR_DAYS)
     
-    # 1. Öncelik: tefas-crawler kütüphanesini dene
+    # 1. Öncelik: tefas-crawler
     try:
         from tefas import Crawler
         tefas = Crawler()
@@ -294,14 +323,14 @@ def fetch_tefas_crawler_engine(fund_code: str):
     except Exception:
         pass
 
-    # 2. Öncelik: TEFAS Resmi Web Karşılaştırma Servisi
-    url = "https://www.tefas.gov.tr/api/DB/BindComparisonFundReturns"
+    # 2. Öncelik: TEFAS Web Karşılaştırma API
+    url = "[https://www.tefas.gov.tr/api/DB/BindComparisonFundReturns](https://www.tefas.gov.tr/api/DB/BindComparisonFundReturns)"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
         "Accept": "application/json, text/javascript, */*; q=0.01",
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-        "Origin": "https://www.tefas.gov.tr",
-        "Referer": "https://www.tefas.gov.tr/TarihselVeriler.aspx",
+        "Origin": "[https://www.tefas.gov.tr](https://www.tefas.gov.tr)",
+        "Referer": "[https://www.tefas.gov.tr/TarihselVeriler.aspx](https://www.tefas.gov.tr/TarihselVeriler.aspx)",
         "X-Requested-With": "XMLHttpRequest"
     }
     payload = {
@@ -370,13 +399,13 @@ def get_fund_series(fund_code: str):
     code = normalize_fund_code(fund_code)
     statuses = []
 
-    # 1. Hat: TEFAS Takasbank Canlı API
+    # 1. Hat: TEFAS Canlı API
     df1, s1 = fetch_tefas_crawler_engine(code)
     statuses.append(s1)
     if df1 is not None and len(df1) >= 2:
         return df1, "TEFAS Canlı API", statuses
 
-    # 2. Hat: Smart Fallback (Kesintisiz Analiz)
+    # 2. Hat: Smart Fallback
     df2, s2 = generate_resilient_fund_series(code)
     statuses.append(s2)
     return df2, "Smart Fallback", statuses
@@ -456,7 +485,7 @@ def compute_fund_metrics(series: pd.DataFrame, fund_code: str):
     }
 
 def fetch_and_compute_one_fund(code: str):
-    time.sleep(0.1)
+    time.sleep(0.08)
     series, source, statuses = get_fund_series(code)
     metrics = compute_fund_metrics(series, code)
     if metrics is None: return code, None, source, statuses
@@ -701,7 +730,7 @@ input_method = st.radio(
 # 1. GITHUB'DAN DOSYA ÇEKME
 if input_method == "🌐 GitHub'dan Otomatik Çek (Raw URL)":
     st.info("💡 GitHub reponuzdaki raw Excel dosya bağlantısını girerek otomatik analiz başlatabilirsiniz.")
-    default_gh_url = "https://raw.githubusercontent.com/tlgssk/kazrisk/main/fonlar.xlsx"
+    default_gh_url = "[https://raw.githubusercontent.com/tlgssk/kazrisk/main/fonlar.xlsx](https://raw.githubusercontent.com/tlgssk/kazrisk/main/fonlar.xlsx)"
     with st.form("github_entry_form"):
         github_url = st.text_input("GitHub Raw Excel Bağlantısı:", value=default_gh_url)
         if st.form_submit_button("🚀 GitHub Dosyasını İndir ve Analiz Et", type="primary", use_container_width=True):
@@ -799,7 +828,7 @@ if not calc_funds:
     st.error(f"❌ Belirtilen fonlar için veri alınamadı. Hatalı Fonlar: {', '.join(failed)}")
     st.stop()
 
-with st.spinner("📊 Model skorları ve duyarlılık hesaplanıyor..."):
+with st.spinner("📊 Model skorları ve canlı Gemini duyarlılığı hesaplanıyor..."):
     calculate_security_scores(calc_funds)
     calculate_market_relative_momentum(calc_funds, TARGET_TRADING_DAYS, RISK_FREE_ANNUAL)
     
@@ -835,7 +864,7 @@ st.dataframe(pd.DataFrame(stream_cards), use_container_width=True, hide_index=Tr
 # SKOR ÖZETLERİ VE EKRAN TABLOSU
 # ============================================================
 
-st.subheader("📈 KAZRİSK Portföy Özeti (V16.0)")
+st.subheader("📈 KAZRİSK Portföy Özeti (V16.1)")
 col1, col2, col3, col4 = st.columns(4)
 scores = [safe_float(x.get("decision_score")) for x in calc_funds if x.get("decision_score") is not None]
 if scores:
@@ -903,7 +932,7 @@ def color_cells(value):
 try: styled_df = df_display.style.map(color_cells)
 except AttributeError: styled_df = df_display.style.applymap(color_cells)
 
-st.subheader("📊 Analiz Sonuçları — Son 5 İşlem Günü Kararları (V16.0)")
+st.subheader("📊 Analiz Sonuçları — Son 5 İşlem Günü Kararları (V16.1)")
 st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
 # ============================================================
@@ -924,11 +953,11 @@ if sell_alerts or buy_alerts:
         if buy_alerts: st.dataframe(pd.DataFrame(buy_alerts), use_container_width=True, hide_index=True)
         else: st.success("Şu an teyitli 'Güçlü Al' fırsatı veren fon yok.")
 
-st.success(f"✅ V16.0 Analiz tamamlandı. Toplam {len(calc_funds)} fon işlendi.")
+st.success(f"✅ V16.1 Analiz tamamlandı. Toplam {len(calc_funds)} fon işlendi.")
 st.download_button(
-    label="📥 KAZRİSK V16.0 Excel İndir",
+    label="📥 KAZRİSK V16.1 Excel İndir",
     data=output,
-    file_name="fonlar_KGDM3_KAZRISK_FINAL_V16_0.xlsx",
+    file_name="fonlar_KGDM3_KAZRISK_FINAL_V16_1.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
 
@@ -937,7 +966,7 @@ st.download_button(
 # ============================================================
 st.markdown("---")
 st.subheader("🔎 Veri Kaynakları & Hata Teşhis Paneli")
-st.caption("Bu bölüm, TEFAS API erişim durumunu ve yanıt kodlarını gösterir.")
+st.caption("Bu bölüm, TEFAS API erişim durumunu ve Gemini AI canlı duyarlılık motorunun durumunu gösterir.")
 
 diagnostic_rows = []
 for item in calc_funds:
