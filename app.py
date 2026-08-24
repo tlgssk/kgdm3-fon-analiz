@@ -1,14 +1,14 @@
 import concurrent.futures
 import datetime as dt
 import io
-import math
 import json
+import math
 import os
 import re
 import time
 from collections import defaultdict
-from dataclasses import dataclass, asdict
-from typing import Optional, List, Dict, Any
+from dataclasses import asdict, dataclass
+from typing import Any, Dict, List, Optional
 
 import openpyxl
 import pandas as pd
@@ -605,7 +605,7 @@ def get_fund_series(universe: pd.DataFrame, fund_code: str, fund_kind: Optional[
     statuses = []
     if universe is not None and not universe.empty:
         rows = universe[universe["code"].eq(code)].copy()
-        if len(rows) >= MIN_ROLLING_DAYS + 1:
+        if len(rows) >= 2:
             ok_status = new_status("TEFAS")
             ok_status.attempted = True
             ok_status.ok = True
@@ -665,6 +665,8 @@ def compute_fund_metrics(series: pd.DataFrame, fund_code: str, fund_kind: Option
     return {
         "code": fund_code,
         "dates": return_dates,
+        "orig_dates": list(return_dates),
+        "orig_returns": list(rets),
         "prices": prices,
         "price_dates": date_keys_all,
         "price_map": price_map,
@@ -754,16 +756,16 @@ def calculate_security_scores(funds: List[dict], reference: dict):
 def calculate_market_relative_momentum(funds: List[dict], reference, window: int):
     for f in funds:
         k = f.get("kind", DEFAULT_FUND_KIND)
-        rets = f.get("daily_returns", [])[-window:]
-        prc = f.get("prices", [])[-(window + 1):]
-        if len(rets) < MIN_ROLLING_DAYS or len(prc) < MIN_ROLLING_DAYS + 1:
+        rets = f.get("orig_returns", f.get("daily_returns", []))[-window:]
+        prc = f.get("prices", [])[-(len(rets) + 1):] if f.get("prices") else []
+        if len(rets) < 1:
             f["market_momentum"] = None
             continue
 
         m_r = sum(rets) / len(rets)
-        vol = (sum((x - m_r) ** 2 for x in rets) / len(rets)) ** 0.5
-        cum = (prc[-1] / prc[0] - 1.0) * 100.0 if prc[0] > 0 else 0.0
-        dd = calculate_max_drawdown(prc)
+        vol = (sum((x - m_r) ** 2 for x in rets) / len(rets)) ** 0.5 if len(rets) > 1 else 0.0
+        cum = (prc[-1] / prc[0] - 1.0) * 100.0 if (len(prc) >= 2 and prc[0] > 0) else calculate_compounded_return(rets)
+        dd = calculate_max_drawdown(prc) if len(prc) >= 2 else 0.0
 
         f["_final_mean_return"] = m_r
         f["_final_sharpe"] = m_r / vol if vol > 1e-12 else 0.0
@@ -798,7 +800,7 @@ def calculate_market_relative_momentum(funds: List[dict], reference, window: int
               MOMENTUM_WEIGHTS["drawdown"] * zd)
         mom = clamp(50.0 + 20.0 * wz, 0.0, 100.0)
 
-        last_d = rets[-1]
+        last_d = rets[-1] if rets else 0.0
         last_2 = sum(rets[-2:]) / 2.0 if len(rets) >= 2 else last_d
         oh = zc >= OVERHEAT_Z_THRESHOLD and (last_d < 0 or last_2 < 0)
         f["overheat_flag"] = oh
@@ -813,16 +815,16 @@ def calculate_trend_scores(funds: List[dict], batch_sentiments: dict) -> int:
 
     all_dates = set()
     for f in funds:
-        all_dates.update(f.get("dates", []))
+        all_dates.update(f.get("orig_dates", f.get("dates", [])))
         
     master_dates = sorted(list(all_dates))
-    if len(master_dates) < MIN_ROLLING_DAYS:
+    if not master_dates:
         return 0
         
     master_dates = master_dates[-TARGET_TRADING_DAYS:]
     
     for f in funds:
-        ret_map = dict(zip(f.get("dates", []), f.get("daily_returns", [])))
+        ret_map = dict(zip(f.get("orig_dates", []), f.get("orig_returns", [])))
         f["dates"] = master_dates
         f["daily_returns"] = [ret_map.get(d) for d in master_dates]
         f["n_days"] = len([r for r in f["daily_returns"] if r is not None])
@@ -835,18 +837,13 @@ def calculate_trend_scores(funds: List[dict], batch_sentiments: dict) -> int:
         f["running_trend_momentum"] = []
 
     for end_idx, day in enumerate(master_dates):
-        if end_idx + 1 < MIN_ROLLING_DAYS:
-            for f in funds:
-                f["running_trend_momentum"].append(None)
-            continue
-
         cur = []
-        window_start = end_idx + 1 - MIN_ROLLING_DAYS
+        window_start = max(0, end_idx + 1 - MIN_ROLLING_DAYS)
         for f in funds:
             r_raw = f["daily_returns"][window_start:end_idx + 1]
             r = [x for x in r_raw if x is not None]
             
-            if len(r) < MIN_ROLLING_DAYS:
+            if not r:
                 continue
                 
             pmap = f.get("price_map", {})
@@ -863,17 +860,14 @@ def calculate_trend_scores(funds: List[dict], batch_sentiments: dict) -> int:
             p_window_dates = ([prev] if prev else []) + master_dates[window_start:end_idx + 1]
             p = [pmap[d] for d in p_window_dates if d in pmap]
             
-            if len(p) < MIN_ROLLING_DAYS + 1:
-                continue
-                
             mr = sum(r) / len(r)
-            vol = (sum((x - mr) ** 2 for x in r) / len(r)) ** 0.5
+            vol = (sum((x - mr) ** 2 for x in r) / len(r)) ** 0.5 if len(r) > 1 else 0.0
             cur.append({
                 "fund": f,
                 "mr": mr,
                 "sh": mr / vol if vol > 1e-12 else 0.0,
                 "cm": calculate_compounded_return(r),
-                "dd": calculate_max_drawdown(p),
+                "dd": calculate_max_drawdown(p) if len(p) >= 2 else 0.0,
             })
 
         if not cur:
@@ -1078,7 +1072,6 @@ def create_excel_output(wb, ws_list, all_funds, common_n_days):
             elif "DÜZELTME" in text: cell.font = yellow_font
             elif "ACİL SAT" in text or "YETERSİZ" in text: cell.font = red_font
 
-    # GÜVENLİ KOŞULLU BİÇİMLENDİRME (Python 3.12 / 3.13 / 3.14 + OpenPyXL Uyumlu)
     if ws_scores.max_row >= 2:
         score_cols = [idx for name, idx in header_index.items() if "Skor" in name]
         for col_idx in score_cols:
@@ -1093,7 +1086,6 @@ def create_excel_output(wb, ws_list, all_funds, common_n_days):
                 ws_scores.conditional_formatting.add(str(rng), rule_yellow)
                 ws_scores.conditional_formatting.add(str(rng), rule_red)
             except Exception:
-                # Koşullu formatlama kütüphane kaynaklı hata verirse dosya üretimini kesintiye uğratmaz
                 pass
 
     cur_col, int_col = header_index.get("AUM (₺)"), header_index.get("Yatırımcı")
@@ -1124,8 +1116,15 @@ def create_excel_output(wb, ws_list, all_funds, common_n_days):
     return output
 
 # ============================================================
-# ANA ARAYÜZ (STREAMLIT) - GELİŞMİŞ GİRİŞ PANELİ
+# ANA ARAYÜZ (STREAMLIT) - SESSION STATE DESTEKLİ PANEL
 # ============================================================
+
+if "analysis_done" not in st.session_state:
+    st.session_state["analysis_done"] = False
+if "req_codes" not in st.session_state:
+    st.session_state["req_codes"] = []
+if "wb_bytes" not in st.session_state:
+    st.session_state["wb_bytes"] = None
 
 st.markdown("### 📥 Veri Giriş Yöntemi Seçin")
 input_method = st.radio(
@@ -1135,59 +1134,76 @@ input_method = st.radio(
     label_visibility="collapsed"
 )
 
-wb = None
-req_codes = []
-
 if input_method == "✍️ Manuel Fon Girişi (+ / Virgül / Boşluk)":
     st.info("💡 Fon kodlarını aralarına `+`, `,` (virgül), `;` (noktalı virgül) veya boşluk koyarak yazabilirsiniz.")
-    manual_input = st.text_area(
-        "Analiz Edilecek Fon Kodları",
-        value="TI3 + MAC + TCD + BIO + YAY",
-        placeholder="Örn: TI3+MAC+TCD veya BIO, YAY, NRC",
-        help="Küçük/büyük harf duyarlılığı yoktur, otomatik düzeltilir."
-    )
-    if st.button("🚀 Manuel Listeyi Analiz Et", type="primary", use_container_width=True):
-        raw_tokens = re.split(r"[\s\+\,\;\-]+", manual_input.strip())
-        req_codes = [normalize_fund_code(t) for t in raw_tokens if t.strip()]
-        req_codes = list(dict.fromkeys(filter(None, req_codes)))
-        
-        wb = openpyxl.Workbook()
-        ws_list = wb.active
-        ws_list.title = "Fon_Listesi"
-        ws_list.append(["Fon Kodu"])
-        for code in req_codes:
-            ws_list.append([code])
+    with st.form("manual_entry_form"):
+        manual_input = st.text_area(
+            "Analiz Edilecek Fon Kodları",
+            value="TI3 + MAC + TCD + BIO + YAY",
+            placeholder="Örn: TI3+MAC+TCD veya BIO, YAY, NRC",
+            help="Küçük/büyük harf duyarlılığı yoktur, otomatik düzeltilir."
+        )
+        submitted = st.form_submit_button("🚀 Manuel Listeyi Analiz Et", type="primary", use_container_width=True)
+        if submitted:
+            raw_tokens = re.split(r"[\s\+\,\;\-]+", manual_input.strip())
+            codes = [normalize_fund_code(t) for t in raw_tokens if t.strip()]
+            codes = list(dict.fromkeys(filter(None, codes)))
+            if codes:
+                temp_wb = openpyxl.Workbook()
+                ws = temp_wb.active
+                ws.title = "Fon_Listesi"
+                ws.append(["Fon Kodu"])
+                for c in codes: ws.append([c])
+                buf = io.BytesIO()
+                temp_wb.save(buf)
+                st.session_state["wb_bytes"] = buf.getvalue()
+                st.session_state["req_codes"] = codes
+                st.session_state["analysis_done"] = True
+                st.rerun()
 
 elif input_method == "📁 Bilgisayardan Excel Yükle":
     uploaded_file = st.file_uploader("Bilgisayardan Excel Seçin (.xlsx)", type=["xlsx"])
     if uploaded_file is not None:
         try:
-            wb = openpyxl.load_workbook(uploaded_file)
-            ws_list = wb["Fon_Listesi"] if "Fon_Listesi" in wb.sheetnames else wb.active
-            req_codes = [normalize_fund_code(r[0].value) for r in ws_list.iter_rows(min_row=2) if r and r[0].value]
-            req_codes = list(dict.fromkeys(filter(None, req_codes)))
+            content = uploaded_file.read()
+            temp_wb = openpyxl.load_workbook(io.BytesIO(content))
+            ws_list = temp_wb["Fon_Listesi"] if "Fon_Listesi" in temp_wb.sheetnames else temp_wb.active
+            codes = [normalize_fund_code(r[0].value) for r in ws_list.iter_rows(min_row=2) if r and r[0].value]
+            codes = list(dict.fromkeys(filter(None, codes)))
+            if codes:
+                st.session_state["wb_bytes"] = content
+                st.session_state["req_codes"] = codes
+                st.session_state["analysis_done"] = True
         except Exception as exc:
             st.error(f"Excel yükleme hatası: {exc}")
 
 elif input_method == "🌐 GitHub Deposu":
     col_gh_btn, col_gh_info = st.columns([1, 2])
     with col_gh_btn:
-        fetch_gh = st.button("🚀 GitHub'dan Çek ve Başlat", type="primary", use_container_width=True)
+        if st.button("🚀 GitHub'dan Çek ve Başlat", type="primary", use_container_width=True):
+            res, stat = request_with_status("GitHub", "GET", GITHUB_FALLBACK_URL)
+            if res and stat.ok:
+                temp_wb = openpyxl.load_workbook(io.BytesIO(res.content))
+                ws_list = temp_wb["Fon_Listesi"] if "Fon_Listesi" in temp_wb.sheetnames else temp_wb.active
+                codes = [normalize_fund_code(r[0].value) for r in ws_list.iter_rows(min_row=2) if r and r[0].value]
+                codes = list(dict.fromkeys(filter(None, codes)))
+                if codes:
+                    st.session_state["wb_bytes"] = res.content
+                    st.session_state["req_codes"] = codes
+                    st.session_state["analysis_done"] = True
+                    st.rerun()
     with col_gh_info:
         st.caption(f"Hedef: `{GITHUB_FALLBACK_URL.split('/')[-1]}`")
-        
-    if fetch_gh:
-        res, stat = request_with_status("GitHub", "GET", GITHUB_FALLBACK_URL)
-        if res and stat.ok:
-            wb = openpyxl.load_workbook(io.BytesIO(res.content))
-            ws_list = wb["Fon_Listesi"] if "Fon_Listesi" in wb.sheetnames else wb.active
-            req_codes = [normalize_fund_code(r[0].value) for r in ws_list.iter_rows(min_row=2) if r and r[0].value]
-            req_codes = list(dict.fromkeys(filter(None, req_codes)))
-            st.success(f"✅ GitHub'dan {len(req_codes)} adet fon başarıyla alındı.")
 
-if not wb or not req_codes:
+req_codes = st.session_state.get("req_codes", [])
+wb_bytes = st.session_state.get("wb_bytes")
+
+if not req_codes or not wb_bytes:
     st.warning("⚠️ Lütfen analiz başlatmak için en az bir geçerli fon kodu girin veya dosya yükleyin.")
     st.stop()
+
+wb = openpyxl.load_workbook(io.BytesIO(wb_bytes))
+ws_list = wb["Fon_Listesi"] if "Fon_Listesi" in wb.sheetnames else wb.active
 
 st.write(f"🎯 **Analize Alınan Fonlar ({len(req_codes)} adet):** `{', '.join(req_codes)}`")
 
@@ -1214,7 +1230,11 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as exe:
         prog.progress((i + 1) / len(req_codes))
 prog.empty()
 
-eligible = [f for f in calc_funds if f.get("n_days", 0) >= MIN_ROLLING_DAYS]
+eligible = [f for f in calc_funds if f.get("n_days", 0) >= 1]
+
+if not eligible:
+    st.error("❌ Belirtilen fonlar için TEFAS/İş Yatırım üzerinden fiyat geçmişi alınamadı. Lütfen fon kodlarını kontrol edin.")
+    st.stop()
 
 with st.spinner("📊 V13 Modeli (Gemini Toplu Sentiment + Baseline) Hesaplanıyor..."):
     for f in eligible: audit_fund_data(f)
@@ -1260,7 +1280,7 @@ def parse_dm_ui(dm_str):
         return dt.date(1970, 1, 1)
 
 sorted_dates_ui = sorted(list(all_dates_ui), key=parse_dm_ui)
-sample_dates_ui = sorted_dates_ui[-common_n:] if common_n > 0 else sorted_dates_ui[-5:]
+sample_dates_ui = sorted_dates_ui[-common_n:] if common_n > 0 else sorted_dates_ui
 last_5_dates_web = sample_dates_ui[-5:] if len(sample_dates_ui) >= 5 else sample_dates_ui
 
 for item in eligible:
