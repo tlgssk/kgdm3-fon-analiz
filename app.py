@@ -189,7 +189,6 @@ with st.sidebar.expander("⚖️ Skor Ağırlıkları (V13.15)"):
 
 SHOW_DIAGNOSTICS = st.sidebar.checkbox("Kaynak tanılama bilgisini göster", value=True)
 
-
 # ============================================================
 # CANLI GEMINI DUYARLILIK MOTORU - V13.15
 # ============================================================
@@ -279,7 +278,6 @@ Her biri için maksimum 6 kelimelik kısa bir gerekçe etiketi üret.
         "generationConfig": {"responseMimeType": "application/json"}
     }
 
-    # V13.15 DÜZELTMESİ: 429 Hataları için Deep Sleep ve Retry döngüsü geri getirildi!
     last_err = ""
     for attempt in range(5):
         try:
@@ -300,7 +298,7 @@ Her biri için maksimum 6 kelimelik kısa bir gerekçe etiketi üret.
                     else:
                         result_map[area] = {"score": 50, "label": "Nötr", "ai_active": True, "ai_reason": "Yapay Zeka bu alanı atladı"}
                 
-                time.sleep(6.0) # Google API dakika limit koruması
+                time.sleep(6.0)
                 return result_map
             elif response.status_code == 429:
                 last_err = "429 Kotası Aşıldı (Derin Uyku)"
@@ -315,11 +313,9 @@ Her biri için maksimum 6 kelimelik kısa bir gerekçe etiketi üret.
             last_err = f"Bağlantı Koptu: {str(exc)[:40]}"
             time.sleep(5)
 
-    # 5 denemede de başarısız olursa
     for area in areas:
         result_map[area] = {"score": 50, "label": "Nötr", "ai_active": False, "ai_reason": f"API Hatası: {last_err}"}
     return result_map
-
 
 # ============================================================
 # TEFAS API VE METRİKLER 
@@ -366,7 +362,6 @@ def calculate_max_drawdown(prices):
     return max_dd
 
 def zscore(values):
-    # V13.15 DÜZELTMESİ: Verisi olmayan fonlara (None), Z-skoru olarak 0 atamak yerine None döner
     clean = [optional_float(v) for v in values]
     valid = [v for v in clean if v is not None]
     if len(valid) < 2:
@@ -527,7 +522,7 @@ def fetch_isyatirim_series(fund_code: str):
             df["aum"], df["investors"] = None, None
             df = df.dropna(subset=["date", "price"])
             df = df[df["price"] > 0].sort_values("date").drop_duplicates(subset=["date"], keep="last").tail(TARGET_TRADING_DAYS + 1).reset_index(drop=True)
-            if len(df) >= 2: return df[["date", "price", "aum", "investors"]], status
+            if len(df) >= 2: return df, status
         except: pass
     return None, status
 
@@ -719,7 +714,6 @@ def calculate_security_scores(funds: List[dict], reference: dict):
         subset = [funds[i] for i in indices]
         ref = reference.get(kind, {})
 
-        # V13.14 HARİKA DOKUNUŞ: AUM ve yatırımcı sayısı sağa çarpık olduğundan log dönüşümü kullanılır.
         aum_ref = [safe_float(x) for x in ref.get("aum", []) if optional_float(x) is not None and safe_float(x) > 0]
         inv_ref = [safe_float(x) for x in ref.get("investors", []) if optional_float(x) is not None and safe_float(x) > 0]
 
@@ -819,7 +813,6 @@ def calculate_trend_scores(funds: List[dict], batch_sentiments: dict) -> int:
     if not funds:
         return 0
 
-    # V13.15 DÜZELTMESİ: Kesişim (Intersection) Tuzağı giderildi. "Union" ile master timeline yaratıldı.
     all_dates = set()
     for f in funds:
         all_dates.update(f.get("dates", []))
@@ -1123,33 +1116,77 @@ def create_excel_output(wb, ws_list, all_funds, common_n_days):
     return output
 
 # ============================================================
-# ANA ARAYÜZ (STREAMLIT)
+# ANA ARAYÜZ (STREAMLIT) - GELİŞMİŞ GİRİŞ PANELİ
 # ============================================================
 
-col_upload, col_github = st.columns(2)
+st.markdown("### 📥 Veri Giriş Yöntemi Seçin")
+input_method = st.radio(
+    "Veri Kaynağı:",
+    options=["✍️ Manuel Fon Girişi (+ / Virgül / Boşluk)", "📁 Bilgisayardan Excel Yükle", "🌐 GitHub Deposu"],
+    horizontal=True,
+    label_visibility="collapsed"
+)
+
 wb = None
+req_codes = []
 
-with col_upload:
-    uploaded_file = st.file_uploader("Bilgisayardan Excel Yükle", type=["xlsx"])
+if input_method == "✍️ Manuel Fon Girişi (+ / Virgül / Boşluk)":
+    st.info("💡 Fon kodlarını aralarına `+`, `,` (virgül), `;` (noktalı virgül) veya boşluk koyarak yazabilirsiniz.")
+    manual_input = st.text_area(
+        "Analiz Edilecek Fon Kodları",
+        value="TI3 + MAC + TCD + BIO + YAY",
+        placeholder="Örn: TI3+MAC+TCD veya BIO, YAY, NRC",
+        help="Küçük/büyük harf duyarlılığı yoktur, otomatik düzeltilir."
+    )
+    if st.button("🚀 Manuel Listeyi Analiz Et", type="primary", use_container_width=True):
+        raw_tokens = re.split(r"[\s\+\,\;\-]+", manual_input.strip())
+        req_codes = [normalize_fund_code(t) for t in raw_tokens if t.strip()]
+        req_codes = list(dict.fromkeys(filter(None, req_codes)))
+        
+        # Sanal Excel nesnesi üret
+        wb = openpyxl.Workbook()
+        ws_list = wb.active
+        ws_list.title = "Fon_Listesi"
+        ws_list.append(["Fon Kodu"])
+        for code in req_codes:
+            ws_list.append([code])
+
+elif input_method == "📁 Bilgisayardan Excel Yükle":
+    uploaded_file = st.file_uploader("Bilgisayardan Excel Seçin (.xlsx)", type=["xlsx"])
     if uploaded_file is not None:
-        try: wb = openpyxl.load_workbook(uploaded_file)
-        except Exception as exc: st.error(f"Excel yükleme hatası: {exc}")
+        try:
+            wb = openpyxl.load_workbook(uploaded_file)
+            ws_list = wb["Fon_Listesi"] if "Fon_Listesi" in wb.sheetnames else wb.active
+            req_codes = [normalize_fund_code(r[0].value) for r in ws_list.iter_rows(min_row=2) if r and r[0].value]
+            req_codes = list(dict.fromkeys(filter(None, req_codes)))
+        except Exception as exc:
+            st.error(f"Excel yükleme hatası: {exc}")
 
-with col_github:
-    if st.button("🚀 GitHub'dan Çek ve Analiz Et", use_container_width=True):
-        url = GITHUB_FALLBACK_URL
-        res, stat = request_with_status("GitHub", "GET", url)
+elif input_method == "🌐 GitHub Deposu":
+    col_gh_btn, col_gh_info = st.columns([1, 2])
+    with col_gh_btn:
+        fetch_gh = st.button("🚀 GitHub'dan Çek ve Başlat", type="primary", use_container_width=True)
+    with col_gh_info:
+        st.caption(f"Hedef: `{GITHUB_FALLBACK_URL.split('/')[-1]}`")
+        
+    if fetch_gh:
+        res, stat = request_with_status("GitHub", "GET", GITHUB_FALLBACK_URL)
         if res and stat.ok:
             wb = openpyxl.load_workbook(io.BytesIO(res.content))
-            st.success("✅ Veri çekildi.")
+            ws_list = wb["Fon_Listesi"] if "Fon_Listesi" in wb.sheetnames else wb.active
+            req_codes = [normalize_fund_code(r[0].value) for r in ws_list.iter_rows(min_row=2) if r and r[0].value]
+            req_codes = list(dict.fromkeys(filter(None, req_codes)))
+            st.success(f"✅ GitHub'dan {len(req_codes)} adet fon başarıyla alındı.")
 
-if wb is None: st.stop()
+if not wb or not req_codes:
+    st.warning("⚠️ Lütfen analiz başlatmak için en az bir geçerli fon kodu girin veya dosya yükleyin.")
+    st.stop()
 
-ws_list = wb["Fon_Listesi"] if "Fon_Listesi" in wb.sheetnames else wb.active
-req_codes = [normalize_fund_code(r[0].value) for r in ws_list.iter_rows(min_row=2) if r and r[0].value]
-req_codes = list(dict.fromkeys(filter(None, req_codes)))
+st.write(f"🎯 **Analize Alınan Fonlar ({len(req_codes)} adet):** `{', '.join(req_codes)}`")
 
-if not req_codes: st.stop()
+# ============================================================
+# HESAPLAMA MOTORU & ANALİZ
+# ============================================================
 
 with st.spinner("🔄 TEFAS verileri alınıyor..."):
     today = dt.date.today()
@@ -1335,7 +1372,6 @@ if SHOW_DIAGNOSTICS:
     st.subheader("🔎 Veri Kaynağı Tanılaması & Gemini AI Modu")
     diagnostic_rows = []
     for item in eligible:
-        
         reason = item.get("sentiment_ai_reason", "Bilinmiyor")
         if item.get("sentiment_ai_active"):
             ai_status = "🟢 Aktif (Canlı API)"
