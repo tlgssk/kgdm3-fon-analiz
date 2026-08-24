@@ -1,5 +1,5 @@
 # ============================================================
-# KGDM-3 & KAZRİSK - SÜRÜM V14.1 (IMPORT HATASI GİDERİLMİŞ SÜRÜM)
+# KGDM-3 & KAZRİSK - SÜRÜM V14.2 (EKSİK FONKSİYON YAMASI)
 # ============================================================
 
 import concurrent.futures
@@ -20,7 +20,7 @@ import pandas as pd
 import requests
 import urllib3
 import cloudscraper
-import streamlit as st  # <--- Eksik olan kritik kütüphane eklendi
+import streamlit as st
 
 from openpyxl.formatting.rule import CellIsRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -57,7 +57,7 @@ PatternFill.__init__ = new_init
 
 st.set_page_config(page_title="KGDM-3 & KAZRİSK Hibrit Fon Analizi", page_icon="📊", layout="wide")
 st.title("📊 KGDM-3 & KAZRİSK Hibrit Fon Analizi")
-st.caption("TEFAS + Cloudscraper + İş Yatırım | Gemini SDK (google-genai) | V14.1 Anti-Bot")
+st.caption("TEFAS + Cloudscraper + İş Yatırım | Gemini SDK (google-genai) | V14.2 Anti-Bot")
 
 # ============================================================
 # AYARLAR VE SABİTLER
@@ -389,6 +389,16 @@ def fetch_tefas_universe(start_date: dt.date, end_date: dt.date) -> pd.DataFrame
             return df.dropna(subset=["date", "code", "price"])[df["price"] > 0].sort_values(["code", "date"]).drop_duplicates(subset=["code", "date"], keep="last").reset_index(drop=True)
     except: pass
     return pd.DataFrame()
+
+# V14.2: EKSİK FONKSİYON EKLENDİ
+def build_fund_meta_map(universe: pd.DataFrame):
+    meta = {}
+    if universe is not None and not universe.empty:
+        latest = universe.sort_values("date").drop_duplicates(subset=["code"], keep="last")
+        for _, row in latest.iterrows():
+            code = str(row.get("code", "")).strip().upper()
+            if code: meta[code] = {"kind": str(row.get("kind", DEFAULT_FUND_KIND)), "title": str(row.get("title", ""))}
+    return meta
 
 def build_universe_reference(universe: pd.DataFrame, window: int):
     ref = {k: {"mean_return": [], "sharpe": [], "cumulative": [], "max_dd_inv": [], "aum": [], "investors": []} for k in FUND_KINDS}
@@ -861,7 +871,7 @@ output = create_excel_output(wb, ws_list, eligible, common_n)
 # SKOR ÖZETLERİ VE EKRAN TABLOSU
 # ============================================================
 
-st.subheader("📈 KAZRİSK Portföy Özeti (V14.1)")
+st.subheader("📈 KAZRİSK Portföy Özeti (V14.2)")
 col1, col2, col3, col4 = st.columns(4)
 scores = [safe_float(x.get("decision_score")) for x in eligible if x.get("decision_score") is not None]
 if scores:
@@ -935,7 +945,7 @@ def color_cells(value):
 try: styled_df = df_display.style.map(color_cells)
 except AttributeError: styled_df = df_display.style.applymap(color_cells)
 
-st.subheader("📊 Analiz Sonuçları — Son 5 İşlem Günü Kararları (V14.1)")
+st.subheader("📊 Analiz Sonuçları — Son 5 İşlem Günü Kararları (V14.2)")
 st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
 # ============================================================
@@ -956,11 +966,11 @@ if sell_alerts or buy_alerts:
         if buy_alerts: st.dataframe(pd.DataFrame(buy_alerts), use_container_width=True, hide_index=True)
         else: st.success("Şu an teyitli 'Güçlü Al' fırsatı veren fon yok.")
 
-st.success(f"✅ V14.1 Analiz tamamlandı. Toplam {len(eligible)} fon işlendi.")
+st.success(f"✅ V14.2 Analiz tamamlandı. Toplam {len(eligible)} fon işlendi.")
 st.download_button(
-    label="📥 KAZRİSK V14.1 Excel İndir",
+    label="📥 KAZRİSK V14.2 Excel İndir",
     data=output,
-    file_name="fonlar_KGDM3_KAZRISK_FINAL_V14_1.xlsx",
+    file_name="fonlar_KGDM3_KAZRISK_FINAL_V14_2.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
 
