@@ -1,5 +1,5 @@
 # ============================================================
-# KGDM-3 & KAZRİSK - SÜRÜM V14.2 (EKSİK FONKSİYON YAMASI)
+# KGDM-3 & KAZRİSK - SÜRÜM V14.3 (EKSİK SABİTLER YAMASI)
 # ============================================================
 
 import concurrent.futures
@@ -57,7 +57,7 @@ PatternFill.__init__ = new_init
 
 st.set_page_config(page_title="KGDM-3 & KAZRİSK Hibrit Fon Analizi", page_icon="📊", layout="wide")
 st.title("📊 KGDM-3 & KAZRİSK Hibrit Fon Analizi")
-st.caption("TEFAS + Cloudscraper + İş Yatırım | Gemini SDK (google-genai) | V14.2 Anti-Bot")
+st.caption("TEFAS + Cloudscraper + İş Yatırım | Gemini SDK (google-genai) | V14.3 Anti-Bot")
 
 # ============================================================
 # AYARLAR VE SABİTLER
@@ -72,6 +72,11 @@ MIN_ROLLING_DAYS = 5
 
 HTTP_TIMEOUT = 18
 MAX_WORKERS = 3
+
+# V14.3 DÜZELTMESİ: Silinen referans ve ısınma sabitleri geri eklendi
+MIN_REFERENCE_SAMPLE = 5
+OVERHEAT_Z_THRESHOLD = 2.0
+OVERHEAT_PENALTY = 6.0
 
 DEFAULT_MOMENTUM_WEIGHTS = {"return": 0.30, "sharpe": 0.25, "cumulative": 0.25, "drawdown": 0.20}
 SECURITY_WEIGHTS = {"aum": 0.30, "investor": 0.25, "concentration": 0.25, "liquidity": 0.20}
@@ -219,7 +224,6 @@ def fetch_batch_market_sentiment(areas: list, api_key: str) -> dict:
 SADECE geçerli bir JSON objesi üret: {{"Alan Adı": {{"score": 75, "label": "Kısa gerekçe"}}}}"""
 
     last_err = ""
-    # 1. Yöntem: Yeni google-genai kütüphanesi
     if HAS_GOOGLE_GENAI:
         try:
             client = genai.Client(api_key=api_key_clean)
@@ -239,7 +243,6 @@ SADECE geçerli bir JSON objesi üret: {{"Alan Adı": {{"score": 75, "label": "K
         except Exception as e:
             last_err = f"genai hatası: {str(e)[:40]}"
     
-    # 2. Yöntem: Requests Fallback
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key_clean}"
     try:
         response = requests.post(url, headers={'Content-Type': 'application/json'}, json={"contents": [{"role": "user", "parts": [{"text": prompt}]}]}, timeout=15)
@@ -390,7 +393,6 @@ def fetch_tefas_universe(start_date: dt.date, end_date: dt.date) -> pd.DataFrame
     except: pass
     return pd.DataFrame()
 
-# V14.2: EKSİK FONKSİYON EKLENDİ
 def build_fund_meta_map(universe: pd.DataFrame):
     meta = {}
     if universe is not None and not universe.empty:
@@ -871,7 +873,7 @@ output = create_excel_output(wb, ws_list, eligible, common_n)
 # SKOR ÖZETLERİ VE EKRAN TABLOSU
 # ============================================================
 
-st.subheader("📈 KAZRİSK Portföy Özeti (V14.2)")
+st.subheader("📈 KAZRİSK Portföy Özeti (V14.3)")
 col1, col2, col3, col4 = st.columns(4)
 scores = [safe_float(x.get("decision_score")) for x in eligible if x.get("decision_score") is not None]
 if scores:
@@ -945,7 +947,7 @@ def color_cells(value):
 try: styled_df = df_display.style.map(color_cells)
 except AttributeError: styled_df = df_display.style.applymap(color_cells)
 
-st.subheader("📊 Analiz Sonuçları — Son 5 İşlem Günü Kararları (V14.2)")
+st.subheader("📊 Analiz Sonuçları — Son 5 İşlem Günü Kararları (V14.3)")
 st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
 # ============================================================
@@ -966,11 +968,11 @@ if sell_alerts or buy_alerts:
         if buy_alerts: st.dataframe(pd.DataFrame(buy_alerts), use_container_width=True, hide_index=True)
         else: st.success("Şu an teyitli 'Güçlü Al' fırsatı veren fon yok.")
 
-st.success(f"✅ V14.2 Analiz tamamlandı. Toplam {len(eligible)} fon işlendi.")
+st.success(f"✅ V14.3 Analiz tamamlandı. Toplam {len(eligible)} fon işlendi.")
 st.download_button(
-    label="📥 KAZRİSK V14.2 Excel İndir",
+    label="📥 KAZRİSK V14.3 Excel İndir",
     data=output,
-    file_name="fonlar_KGDM3_KAZRISK_FINAL_V14_2.xlsx",
+    file_name="fonlar_KGDM3_KAZRISK_FINAL_V14_3.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
 
