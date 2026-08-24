@@ -1,5 +1,5 @@
 # ============================================================
-# tlgssk - SÜRÜM V14.4 (GITHUB + MANUEL + EXCEL GİRİŞLİ TAM SÜRÜM)
+# tlgssk - SÜRÜM V14.5 (TEFAS ÇEREZ EL SIKIŞMALI KARARLI SÜRÜM)
 # ============================================================
 
 import concurrent.futures
@@ -46,7 +46,7 @@ st.set_page_config(
 
 st.title("📊 tlgssk Hibrit Fon Analizi")
 st.caption(
-    "TEFAS + İş Yatırım | Gemini Sentiment + GitHub Entegrasyonu | V14.4"
+    "TEFAS + İş Yatırım | Gemini Sentiment + GitHub Entegrasyonu | V14.5"
 )
 
 # ============================================================
@@ -78,7 +78,7 @@ COLOR_NAVY, COLOR_GREEN, COLOR_RED, COLOR_YELLOW, COLOR_WHITE = "1F4E79", "00800
 COLOR_LIGHT_GREEN, COLOR_LIGHT_YELLOW, COLOR_LIGHT_RED = "E2F0D9", "FFF2CC", "FCE4D6"
 
 # ============================================================
-# HTTP OTURUMU & GÜÇLENDİRİLMİŞ HEADERS
+# HTTP OTURUMU & ÇEREZ EL SIKIŞMASI (HANDSHAKE)
 # ============================================================
 
 def build_http_session() -> requests.Session:
@@ -95,6 +95,19 @@ def build_http_session() -> requests.Session:
     adapter = HTTPAdapter(max_retries=retry, pool_connections=15, pool_maxsize=15)
     session.mount("https://", adapter)
     session.mount("http://", adapter)
+    
+    # TEFAS Session Başlatma (Çerez Alma)
+    try:
+        session.get(
+            "https://www.tefas.gov.tr/TarihselVeriler.aspx",
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            },
+            timeout=8
+        )
+    except Exception:
+        pass
+        
     return session
 
 HTTP = build_http_session()
@@ -199,11 +212,6 @@ def parse_number(value):
     elif "." in text and re.match(r"^-?\d{1,3}(\.\d{3})+$", text): text = text.replace(".", "")
     try: return float(text)
     except Exception: return None
-
-def format_percent(value):
-    n = parse_number(value)
-    if n is None: return "-"
-    return f"+%{n:.2f}" if n > 0 else (f"-%{abs(n):.2f}" if n < 0 else "%0.00")
 
 def calculate_compounded_return(returns):
     clean = [parse_number(v) for v in returns if v is not None]
@@ -311,14 +319,16 @@ def fetch_tefas_direct_api(fund_code: str):
         "Connection": "keep-alive"
     }
     
-    kinds = ["YAT", "EMK", "BYF", ""]
-    for kind in kinds:
-        payload = {
-            "fontip": kind,
-            "fonkod": code,
-            "bastarih": start.strftime("%d.%m.%Y"),
-            "bittarih": end.strftime("%d.%m.%Y")
-        }
+    # 1. Standart Form-URL ile Dene
+    payload = {
+        "fontip": "YAT",
+        "fonkod": code,
+        "bastarih": start.strftime("%d.%m.%Y"),
+        "bittarih": end.strftime("%d.%m.%Y")
+    }
+    
+    for kind in ["YAT", "EMK", "BYF", ""]:
+        payload["fontip"] = kind
         try:
             res = HTTP.post(url, data=payload, headers=headers, timeout=HTTP_TIMEOUT)
             status["status_code"] = res.status_code
@@ -350,15 +360,17 @@ def fetch_isyatirim_series(fund_code: str):
     url = "https://www.isyatirim.com.tr/_layouts/15/IsYatirim.Website/Common/Data.aspx/YatirimFonGecmisGetiri"
     params = {"fonKod": code, "baslangic": start.strftime("%d-%m-%Y"), "bitis": end.strftime("%d-%m-%Y")}
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Referer": "https://www.isyatirim.com.tr/tr-tr/analiz/fonlar/Sayfalar/default.aspx",
         "X-Requested-With": "XMLHttpRequest"
     }
     try:
         res = HTTP.get(url, params=params, headers=headers, timeout=HTTP_TIMEOUT)
         status["status_code"] = res.status_code
         if res.status_code == 200:
-            df = pd.DataFrame(res.json().get("value", []))
+            resp_data = res.json().get("value", [])
+            df = pd.DataFrame(resp_data)
             if not df.empty and "Tarih" in df.columns and "Fiyat" in df.columns:
                 df["date"] = pd.to_datetime(df["Tarih"], dayfirst=True, errors="coerce")
                 df["price"] = df["Fiyat"].apply(parse_number)
@@ -467,7 +479,7 @@ def compute_fund_metrics(series: pd.DataFrame, fund_code: str):
     }
 
 def fetch_and_compute_one_fund(code: str):
-    time.sleep(0.05)
+    time.sleep(0.08)
     series, source, statuses = get_fund_series(code)
     metrics = compute_fund_metrics(series, code)
     if metrics is None: return code, None, source, statuses
@@ -827,7 +839,7 @@ output = create_excel_output(wb, calc_funds, common_n)
 # SKOR ÖZETLERİ VE EKRAN TABLOSU
 # ============================================================
 
-st.subheader("📈 KAZRİSK Portföy Özeti (V14.4)")
+st.subheader("📈 KAZRİSK Portföy Özeti (V14.5)")
 col1, col2, col3, col4 = st.columns(4)
 scores = [safe_float(x.get("decision_score")) for x in calc_funds if x.get("decision_score") is not None]
 if scores:
@@ -895,7 +907,7 @@ def color_cells(value):
 try: styled_df = df_display.style.map(color_cells)
 except AttributeError: styled_df = df_display.style.applymap(color_cells)
 
-st.subheader("📊 Analiz Sonuçları — Son 5 İşlem Günü Kararları (V14.4)")
+st.subheader("📊 Analiz Sonuçları — Son 5 İşlem Günü Kararları (V14.5)")
 st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
 # ============================================================
@@ -916,11 +928,11 @@ if sell_alerts or buy_alerts:
         if buy_alerts: st.dataframe(pd.DataFrame(buy_alerts), use_container_width=True, hide_index=True)
         else: st.success("Şu an teyitli 'Güçlü Al' fırsatı veren fon yok.")
 
-st.success(f"✅ V14.4 Analiz tamamlandı. Toplam {len(calc_funds)} fon işlendi.")
+st.success(f"✅ V14.5 Analiz tamamlandı. Toplam {len(calc_funds)} fon işlendi.")
 st.download_button(
-    label="📥 KAZRİSK V14.4 Excel İndir",
+    label="📥 KAZRİSK V14.5 Excel İndir",
     data=output,
-    file_name="fonlar_KGDM3_KAZRISK_FINAL_V14_4.xlsx",
+    file_name="fonlar_KGDM3_KAZRISK_FINAL_V14_5.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
 
