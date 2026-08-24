@@ -20,6 +20,7 @@ import pandas as pd
 import requests
 import urllib3
 import cloudscraper
+import streamlit as st  # <--- Eksik olan kritik kütüphane eklendi
 from openpyxl.formatting.rule import CellIsRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
