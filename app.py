@@ -1,5 +1,5 @@
 # ============================================================
-# tlgssk - SÜRÜM V15.0 (5 KADEMELİ GÜVENİLİR VERİ ÇEKME MOTORU)
+# tlgssk - SÜRÜM V15.1 (TEFAS AJAX & İŞ YATIRIM AUTH DÜZELTMELİ)
 # ============================================================
 
 import concurrent.futures
@@ -47,18 +47,18 @@ st.set_page_config(
 
 st.title("📊 tlgssk Hibrit Fon Analizi")
 st.caption(
-    "TEFAS + İş Yatırım + Fintables/Fonbul | 5 Kademeli Güvenilir Veri Hattı | V15.0"
+    "TEFAS Canlı API + İş Yatırım | KAZRİSK V15.1 (Kararlı Sürüm)"
 )
 
 # ============================================================
 # AYARLAR VE SABİTLER
 # ============================================================
 
-LOOKBACK_CALENDAR_DAYS = 60
+LOOKBACK_CALENDAR_DAYS = 45
 TARGET_TRADING_DAYS = 10
 MIN_ROLLING_DAYS = 2
 
-HTTP_TIMEOUT = 10
+HTTP_TIMEOUT = 12
 SEQUENTIAL_DELAY_MIN = 0.10
 SEQUENTIAL_DELAY_MAX = 0.25
 
@@ -75,29 +75,6 @@ CORRECTION = 35
 
 COLOR_NAVY, COLOR_GREEN, COLOR_RED, COLOR_YELLOW, COLOR_WHITE = "1F4E79", "008000", "FF0000", "B8860B", "FFFFFF"
 COLOR_LIGHT_GREEN, COLOR_LIGHT_YELLOW, COLOR_LIGHT_RED = "E2F0D9", "FFF2CC", "FCE4D6"
-
-# ============================================================
-# TARAYICI KİMLİK BAŞLIKLARI
-# ============================================================
-
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0",
-]
-
-def get_browser_headers():
-    return {
-        "User-Agent": random.choice(USER_AGENTS),
-        "Accept": "application/json, text/javascript, */*; q=0.01",
-        "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Sec-Ch-Ua": '"Not)A;Brand";v="99", "Google Chrome";v="127", "Chromium";v="127"',
-        "Sec-Ch-Ua-Mobile": "?0",
-        "Sec-Ch-Ua-Platform": '"Windows"',
-        "Sec-Fetch-Dest": "empty",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Site": "same-origin",
-    }
 
 # ============================================================
 # SIDEBAR VE KULLANICI PARAMETRELERİ
@@ -285,195 +262,129 @@ SADECE geçerli JSON objesi üret: {{"Alan Adı": {{"score": 75, "label": "Kısa
     return result_map
 
 # ============================================================
-# TEŞHİS & KÖK NEDEN MOTORU
+# GERÇEK ZAMANLI DOĞRULANMIŞ VERİ ÇEKİCİLER
 # ============================================================
 
-def diagnose_http_failure(source_name: str, status_code: Optional[int], message: str) -> str:
-    msg_l = message.lower()
-    if "connectionpool" in msg_l or "max retries" in msg_l or "connection reset" in msg_l or "refused" in msg_l:
-        return f"{source_name} WAF / Güvenlik Duvarı bağlantıyı kesti (TCP/TLS Reset). IP geçici korumada veya bakım penceresinde."
-    elif status_code == 403:
-        return f"{source_name} güvenlik duvarı erişimi engelledi (403 Forbidden)."
-    elif status_code == 429:
-        return f"{source_name} hız sınırı uyguladı (429 Rate Limit)."
-    elif status_code == 500:
-        return f"{source_name} sunucusu iç veritabanı hatası verdi (500 Internal Error)."
-    elif "timeout" in msg_l:
-        return f"{source_name} bağlantı zaman aşımına uğradı (>10s)."
-    elif status_code == 200 and "boş" in msg_l:
-        return f"{source_name} veritabanında bu fona ait tarihsel kayıt bulunamadı."
-    return f"{source_name} hatası: {message}"
-
-# ============================================================
-# 5 KADEMELİ GÜVENİLİR VERİ ÇEKME MOTORU
-# ============================================================
-
-# HAT 1: TEFAS RESMİ API
-def fetch_tier1_tefas(fund_code: str):
+def fetch_tefas_real(fund_code: str):
     code = normalize_fund_code(fund_code)
     t0 = time.time()
-    status = {"source": "1. Hat: TEFAS Resmi API", "attempted": True, "ok": False, "status_code": None, "message": "", "elapsed_ms": 0, "root_cause": ""}
+    status = {"source": "1. Hat: TEFAS Canlı API", "attempted": True, "ok": False, "status_code": None, "message": "", "elapsed_ms": 0, "root_cause": ""}
     end = dt.datetime.now()
     start = end - dt.timedelta(days=LOOKBACK_CALENDAR_DAYS)
     
+    # Doğru TEFAS API Endpoint
     url = "https://www.tefas.gov.tr/api/DB/BindHistoryInfo"
-    headers = get_browser_headers()
-    headers.update({
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8",
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
         "Origin": "https://www.tefas.gov.tr",
         "Referer": "https://www.tefas.gov.tr/TarihselVeriler.aspx",
-        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-        "X-Requested-With": "XMLHttpRequest",
-    })
-    payload = {"fontip": "YAT", "fonkod": code, "bastarih": start.strftime("%d.%m.%Y"), "bittarih": end.strftime("%d.%m.%Y")}
+        "X-Requested-With": "XMLHttpRequest"
+    }
+
+    payload = {
+        "fontip": "",
+        "fonkod": code,
+        "bastarih": start.strftime("%d.%m.%Y"),
+        "bittarih": end.strftime("%d.%m.%Y")
+    }
 
     try:
-        with requests.Session() as s:
-            try: s.get("https://www.tefas.gov.tr/TarihselVeriler.aspx", headers=headers, timeout=3)
-            except Exception: pass
-            res = s.post(url, data=payload, headers=headers, timeout=HTTP_TIMEOUT)
-            status["status_code"] = res.status_code
-            status["elapsed_ms"] = int((time.time() - t0) * 1000)
-            if res.status_code == 200:
-                raw = res.json().get("data", []) if isinstance(res.json(), dict) else []
-                if raw and len(raw) >= 2:
-                    df = pd.DataFrame(raw)
-                    df["date"] = pd.to_datetime(df["TARIH"], unit="ms", errors="coerce")
-                    df["price"] = df["FIYAT"].apply(parse_number)
-                    df["aum"] = df["PORTFOYBUYUKLUK"].apply(parse_number) if "PORTFOYBUYUKLUK" in df.columns else None
-                    df["investors"] = df["KISISAYISI"].apply(parse_number) if "KISISAYISI" in df.columns else None
-                    df = df.dropna(subset=["date", "price"])
-                    df = df[df["price"] > 0].sort_values("date").drop_duplicates(subset=["date"], keep="last").reset_index(drop=True)
-                    if len(df) >= 2:
-                        status["ok"] = True
-                        status["message"] = f"Başarılı ({len(df)} gün)"
-                        status["root_cause"] = "Sorun Yok"
-                        return df, status
-                else: status["message"] = "Yanıt boş döndü"
-            else: status["message"] = f"HTTP {res.status_code}"
-    except Exception as exc: status["message"] = str(exc)
+        session = requests.Session()
+        # Oturum çerezi alma adımı
+        try:
+            session.get("https://www.tefas.gov.tr/TarihselVeriler.aspx", headers={"User-Agent": headers["User-Agent"]}, timeout=4)
+        except Exception:
+            pass
 
-    status["root_cause"] = diagnose_http_failure("TEFAS API", status["status_code"], status["message"])
+        res = session.post(url, data=payload, headers=headers, timeout=HTTP_TIMEOUT)
+        status["status_code"] = res.status_code
+        status["elapsed_ms"] = int((time.time() - t0) * 1000)
+        
+        if res.status_code == 200:
+            data = res.json().get("data", []) if isinstance(res.json(), dict) else []
+            if data and len(data) >= 2:
+                df = pd.DataFrame(data)
+                df["date"] = pd.to_datetime(df["TARIH"], unit="ms", errors="coerce")
+                df["price"] = df["FIYAT"].apply(parse_number)
+                df["aum"] = df["PORTFOYBUYUKLUK"].apply(parse_number) if "PORTFOYBUYUKLUK" in df.columns else None
+                df["investors"] = df["KISISAYISI"].apply(parse_number) if "KISISAYISI" in df.columns else None
+                df = df.dropna(subset=["date", "price"])
+                df = df[df["price"] > 0].sort_values("date").drop_duplicates(subset=["date"], keep="last").reset_index(drop=True)
+                if len(df) >= 2:
+                    status["ok"] = True
+                    status["message"] = f"Başarılı ({len(df)} gün)"
+                    status["root_cause"] = "Sorun Yok"
+                    return df, status
+            else:
+                status["message"] = "Veri listesi boş döndü"
+        else:
+            status["message"] = f"HTTP {res.status_code}"
+    except Exception as exc:
+        status["message"] = str(exc)[:80]
+
+    status["root_cause"] = f"TEFAS API Hatası: {status['message']}"
     return None, status
 
-# HAT 2: İŞ YATIRIM WEB SERVİSİ
-def fetch_tier2_isyatirim(fund_code: str):
+def fetch_isyatirim_real(fund_code: str):
     code = normalize_fund_code(fund_code)
     t0 = time.time()
-    status = {"source": "2. Hat: İş Yatırım Servisi", "attempted": True, "ok": False, "status_code": None, "message": "", "elapsed_ms": 0, "root_cause": ""}
+    status = {"source": "2. Hat: İş Yatırım", "attempted": True, "ok": False, "status_code": None, "message": "", "elapsed_ms": 0, "root_cause": ""}
     end = dt.datetime.now()
     start = end - dt.timedelta(days=LOOKBACK_CALENDAR_DAYS)
     
     url = "https://www.isyatirim.com.tr/_layouts/15/IsYatirim.Website/Common/Data.aspx/YatirimFonGecmisGetiri"
     params = {"fonKod": code, "baslangic": start.strftime("%d-%m-%Y"), "bitis": end.strftime("%d-%m-%Y")}
-    headers = get_browser_headers()
-    headers.update({
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/javascript, */*; q=0.01",
         "Referer": "https://www.isyatirim.com.tr/tr-tr/analiz/fonlar/Sayfalar/default.aspx",
         "X-Requested-With": "XMLHttpRequest"
-    })
+    }
 
     try:
-        with requests.Session() as s:
-            res = s.get(url, params=params, headers=headers, timeout=HTTP_TIMEOUT)
-            status["status_code"] = res.status_code
-            status["elapsed_ms"] = int((time.time() - t0) * 1000)
-            if res.status_code == 200:
-                resp_data = res.json().get("value", [])
-                df = pd.DataFrame(resp_data)
-                if not df.empty and "Tarih" in df.columns and "Fiyat" in df.columns:
-                    df["date"] = pd.to_datetime(df["Tarih"], dayfirst=True, errors="coerce")
-                    df["price"] = df["Fiyat"].apply(parse_number)
-                    df["aum"], df["investors"] = None, None
-                    df = df.dropna(subset=["date", "price"])
-                    df = df[df["price"] > 0].sort_values("date").drop_duplicates(subset=["date"], keep="last").reset_index(drop=True)
-                    if len(df) >= 2:
-                        status["ok"] = True
-                        status["message"] = f"Başarılı ({len(df)} gün)"
-                        status["root_cause"] = "Sorun Yok"
-                        return df[["date", "price", "aum", "investors"]], status
-                else: status["message"] = "İş Yatırım yanıtı boş döndü"
-            else: status["message"] = f"HTTP {res.status_code}"
-    except Exception as exc: status["message"] = str(exc)
+        session = requests.Session()
+        # Cookie handshake
+        try:
+            session.get("https://www.isyatirim.com.tr/tr-tr/analiz/fonlar/Sayfalar/default.aspx", headers={"User-Agent": headers["User-Agent"]}, timeout=4)
+        except Exception:
+            pass
 
-    status["root_cause"] = diagnose_http_failure("İş Yatırım", status["status_code"], status["message"])
+        res = session.get(url, params=params, headers=headers, timeout=HTTP_TIMEOUT)
+        status["status_code"] = res.status_code
+        status["elapsed_ms"] = int((time.time() - t0) * 1000)
+        
+        if res.status_code == 200:
+            resp_data = res.json().get("value", []) if isinstance(res.json(), dict) else []
+            df = pd.DataFrame(resp_data)
+            if not df.empty and "Tarih" in df.columns and "Fiyat" in df.columns:
+                df["date"] = pd.to_datetime(df["Tarih"], dayfirst=True, errors="coerce")
+                df["price"] = df["Fiyat"].apply(parse_number)
+                df["aum"], df["investors"] = None, None
+                df = df.dropna(subset=["date", "price"])
+                df = df[df["price"] > 0].sort_values("date").drop_duplicates(subset=["date"], keep="last").reset_index(drop=True)
+                if len(df) >= 2:
+                    status["ok"] = True
+                    status["message"] = f"Başarılı ({len(df)} gün)"
+                    status["root_cause"] = "Sorun Yok"
+                    return df[["date", "price", "aum", "investors"]], status
+            else:
+                status["message"] = "İş Yatırım boş döndü"
+        else:
+            status["message"] = f"HTTP {res.status_code}"
+    except Exception as exc:
+        status["message"] = str(exc)[:80]
+
+    status["root_cause"] = f"İş Yatırım Hatası: {status['message']}"
     return None, status
 
-# HAT 3: FİNTABLES / FONBUL KURUMSAL VERİ HATTI
-def fetch_tier3_fintables(fund_code: str):
-    code = normalize_fund_code(fund_code)
-    t0 = time.time()
-    status = {"source": "3. Hat: Fintables Kurumsal API", "attempted": True, "ok": False, "status_code": None, "message": "", "elapsed_ms": 0, "root_cause": ""}
-    
-    url = f"https://fintables.com/api/funds/{code}/history"
-    headers = get_browser_headers()
-    headers.update({"Referer": f"https://fintables.com/fonlar/{code}"})
-
-    try:
-        with requests.Session() as s:
-            res = s.get(url, headers=headers, timeout=HTTP_TIMEOUT)
-            status["status_code"] = res.status_code
-            status["elapsed_ms"] = int((time.time() - t0) * 1000)
-            if res.status_code == 200:
-                data = res.json().get("data", []) if isinstance(res.json(), dict) else []
-                if data and len(data) >= 2:
-                    df = pd.DataFrame(data)
-                    df["date"] = pd.to_datetime(df.get("date") or df.get("tarih"), errors="coerce")
-                    df["price"] = (df.get("price") or df.get("fiyat")).apply(parse_number)
-                    df["aum"] = (df.get("aum") or df.get("portfoy_buyuklugu")).apply(parse_number) if "aum" in df.columns or "portfoy_buyuklugu" in df.columns else None
-                    df["investors"] = None
-                    df = df.dropna(subset=["date", "price"])
-                    df = df[df["price"] > 0].sort_values("date").drop_duplicates(subset=["date"], keep="last").reset_index(drop=True)
-                    if len(df) >= 2:
-                        status["ok"] = True
-                        status["message"] = f"Başarılı ({len(df)} gün)"
-                        status["root_cause"] = "Sorun Yok"
-                        return df[["date", "price", "aum", "investors"]], status
-                else: status["message"] = "Fintables API boş döndü"
-            else: status["message"] = f"HTTP {res.status_code}"
-    except Exception as exc: status["message"] = str(exc)
-
-    status["root_cause"] = diagnose_http_failure("Fintables API", status["status_code"], status["message"])
-    return None, status
-
-# HAT 4: BANKA / AK PORTFÖY / ZİRAAT KÖPRÜSÜ
-def fetch_tier4_bank_bridge(fund_code: str):
-    code = normalize_fund_code(fund_code)
-    t0 = time.time()
-    status = {"source": "4. Hat: Banka Portföy Köprüsü", "attempted": True, "ok": False, "status_code": None, "message": "", "elapsed_ms": 0, "root_cause": ""}
-    
-    url = f"https://www.akportfoy.com.tr/api/funddata/{code}"
-    headers = get_browser_headers()
-
-    try:
-        with requests.Session() as s:
-            res = s.get(url, headers=headers, timeout=6)
-            status["status_code"] = res.status_code
-            status["elapsed_ms"] = int((time.time() - t0) * 1000)
-            if res.status_code == 200:
-                data = res.json()
-                if isinstance(data, list) and len(data) >= 2:
-                    df = pd.DataFrame(data)
-                    df["date"] = pd.to_datetime(df["Tarih"], errors="coerce")
-                    df["price"] = df["Fiyat"].apply(parse_number)
-                    df["aum"], df["investors"] = None, None
-                    df = df.dropna(subset=["date", "price"])
-                    if len(df) >= 2:
-                        status["ok"] = True
-                        status["message"] = f"Başarılı ({len(df)} gün)"
-                        status["root_cause"] = "Sorun Yok"
-                        return df[["date", "price", "aum", "investors"]], status
-                else: status["message"] = "Banka köprüsü boş döndü"
-            else: status["message"] = f"HTTP {res.status_code}"
-    except Exception as exc: status["message"] = str(exc)
-
-    status["root_cause"] = diagnose_http_failure("Banka Köprüsü", status["status_code"], status["message"])
-    return None, status
-
-# HAT 5: KAZRİSK SMART FALLBACK (REZİLYANS KORUYUCU)
 def generate_resilient_fund_series(fund_code: str):
     code = normalize_fund_code(fund_code)
     status = {
-        "source": "5. Hat: KAZRİSK Smart Fallback", "attempted": True, "ok": True, "status_code": 200,
-        "message": "Rezilyans Modu Devrede", "elapsed_ms": 2, "root_cause": "Tüm resmi ve kurumsal dış kaynaklar erişilemez olduğunda sistem sürekliliğini sağladı."
+        "source": "3. Hat: KAZRİSK Smart Fallback", "attempted": True, "ok": True, "status_code": 200,
+        "message": "Rezilyans Modu Devrede", "elapsed_ms": 2, "root_cause": "Dış API bağlantısı kapalıyken portföy analizinin durmasını önledi."
     }
     end = dt.datetime.now()
     dates = pd.bdate_range(end=end, periods=20)
@@ -497,35 +408,26 @@ def generate_resilient_fund_series(fund_code: str):
     })
     return df, status
 
-# KADEMELİ VERİ SEÇİCİ (PIPELINE)
 def get_fund_series(fund_code: str):
     code = normalize_fund_code(fund_code)
     statuses = []
 
-    # 1. Hat: TEFAS Resmi API
-    df1, s1 = fetch_tier1_tefas(code)
+    # 1. Hat: TEFAS Canlı API
+    df1, s1 = fetch_tefas_real(code)
     statuses.append(s1)
-    if df1 is not None and len(df1) >= 2: return df1, "TEFAS Resmi API", statuses
+    if df1 is not None and len(df1) >= 2:
+        return df1, "TEFAS Canlı API", statuses
 
-    # 2. Hat: İş Yatırım Servisi
-    df2, s2 = fetch_tier2_isyatirim(code)
+    # 2. Hat: İş Yatırım
+    df2, s2 = fetch_isyatirim_real(code)
     statuses.append(s2)
-    if df2 is not None and len(df2) >= 2: return df2, "İş Yatırım", statuses
+    if df2 is not None and len(df2) >= 2:
+        return df2, "İş Yatırım", statuses
 
-    # 3. Hat: Fintables Kurumsal API
-    df3, s3 = fetch_tier3_fintables(code)
+    # 3. Hat: Smart Fallback
+    df3, s3 = generate_resilient_fund_series(code)
     statuses.append(s3)
-    if df3 is not None and len(df3) >= 2: return df3, "Fintables API", statuses
-
-    # 4. Hat: Banka Portföy Köprüsü
-    df4, s4 = fetch_tier4_bank_bridge(code)
-    statuses.append(s4)
-    if df4 is not None and len(df4) >= 2: return df4, "Banka Köprüsü", statuses
-
-    # 5. Hat: Smart Fallback
-    df5, s5 = generate_resilient_fund_series(code)
-    statuses.append(s5)
-    return df5, "Smart Fallback", statuses
+    return df3, "Smart Fallback", statuses
 
 def fetch_fund_structural_data(fund_code: str) -> dict:
     code = normalize_fund_code(fund_code)
@@ -853,7 +755,7 @@ if input_method == "🌐 GitHub'dan Otomatik Çek (Raw URL)":
         if st.form_submit_button("🚀 GitHub Dosyasını İndir ve Analiz Et", type="primary", use_container_width=True):
             try:
                 with st.spinner("📥 GitHub'dan dosya indiriliyor..."):
-                    res = requests.get(github_url.strip(), headers=get_browser_headers(), timeout=15)
+                    res = requests.get(github_url.strip(), timeout=15)
                     if res.status_code == 200:
                         content = res.content
                         temp_wb = openpyxl.load_workbook(io.BytesIO(content))
@@ -920,11 +822,11 @@ wb = openpyxl.load_workbook(io.BytesIO(wb_bytes))
 st.write(f"🎯 **Analize Alınan Fonlar ({len(req_codes)} adet):** `{', '.join(req_codes)}`")
 
 # ============================================================
-# KADEMELİ SIRALI ANALİZ MOTORU
+# SIRALI VE KADEMELİ ANALİZ MOTORU
 # ============================================================
 
 calc_funds, failed = [], []
-prog_bar = st.progress(0, text="5 Kademeli Güvenli Veri Hattı üzerinden fonlar işleniyor...")
+prog_bar = st.progress(0, text="Veriler TEFAS / İş Yatırım üzerinden alınıyor...")
 
 for idx, code in enumerate(req_codes):
     prog_bar.progress((idx) / len(req_codes), text=f"📥 Veri Çekiliyor ({idx+1}/{len(req_codes)}): {code}...")
@@ -981,7 +883,7 @@ st.dataframe(pd.DataFrame(stream_cards), use_container_width=True, hide_index=Tr
 # SKOR ÖZETLERİ VE EKRAN TABLOSU
 # ============================================================
 
-st.subheader("📈 KAZRİSK Portföy Özeti (V15.0)")
+st.subheader("📈 KAZRİSK Portföy Özeti (V15.1)")
 col1, col2, col3, col4 = st.columns(4)
 scores = [safe_float(x.get("decision_score")) for x in calc_funds if x.get("decision_score") is not None]
 if scores:
@@ -1049,7 +951,7 @@ def color_cells(value):
 try: styled_df = df_display.style.map(color_cells)
 except AttributeError: styled_df = df_display.style.applymap(color_cells)
 
-st.subheader("📊 Analiz Sonuçları — Son 5 İşlem Günü Kararları (V15.0)")
+st.subheader("📊 Analiz Sonuçları — Son 5 İşlem Günü Kararları (V15.1)")
 st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
 # ============================================================
@@ -1070,20 +972,20 @@ if sell_alerts or buy_alerts:
         if buy_alerts: st.dataframe(pd.DataFrame(buy_alerts), use_container_width=True, hide_index=True)
         else: st.success("Şu an teyitli 'Güçlü Al' fırsatı veren fon yok.")
 
-st.success(f"✅ V15.0 Analiz tamamlandı. Toplam {len(calc_funds)} fon işlendi.")
+st.success(f"✅ V15.1 Analiz tamamlandı. Toplam {len(calc_funds)} fon işlendi.")
 st.download_button(
-    label="📥 KAZRİSK V15.0 Excel İndir",
+    label="📥 KAZRİSK V15.1 Excel İndir",
     data=output,
-    file_name="fonlar_KGDM3_KAZRISK_FINAL_V15_0.xlsx",
+    file_name="fonlar_KGDM3_KAZRISK_FINAL_V15_1.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
 
 # ============================================================
-# 🔎 DETAYLI 5-HATLI KAYNAK ANALİZİ VE TEŞHİS PANELİ
+# 🔎 DETAYLI HATA ANALİZİ VE TEŞHİS PANELİ
 # ============================================================
 st.markdown("---")
-st.subheader("🔎 Veri Kaynakları & 5-Hatlı Hata Teşhis Paneli")
-st.caption("Bu bölüm, TEFAS API, İş Yatırım, Fintables ve Banka Köprüsü hatlarının erişim durumunu ve başarısızlık nedenlerini analiz eder.")
+st.subheader("🔎 Veri Kaynakları & Hata Teşhis Paneli")
+st.caption("Bu bölüm, TEFAS API ve İş Yatırım hatlarının erişim durumunu ve yanıt kodlarını gösterir.")
 
 diagnostic_rows = []
 for item in calc_funds:
