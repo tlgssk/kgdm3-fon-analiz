@@ -234,18 +234,16 @@ Sadece JSON formatında çıktı ver:
 {{"score": 75, "label": "Gerekçe etiketi"}}
 """
     
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={api_key_clean}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key_clean}"
     headers = {'Content-Type': 'application/json'}
     payload = {
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json"}
     }
     
-    # 5 Kez Yeniden Deneme (Exponential Backoff) Mantığı
     last_err = ""
     for attempt in range(5):
         try:
-            # Standart requests kullanarak bağlantı havuzu çökmelerini önlüyoruz
             response = requests.post(url, headers=headers, json=payload, timeout=20)
             
             if response.status_code == 200:
@@ -253,7 +251,6 @@ Sadece JSON formatında çıktı ver:
                 raw_text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "{}")
                 parsed_data = json.loads(raw_text.strip("```json\n").strip("```").strip())
                 
-                # V10.9 DÜZELTMESİ: 15 İstek/Dakika sınırını aşmamak için BAŞARILI çağrıdan sonra 4.5 saniye bekle
                 time.sleep(4.5)
                 
                 return {
@@ -264,7 +261,6 @@ Sadece JSON formatında çıktı ver:
                 }
             elif response.status_code == 429:
                 last_err = "429 Kotası Aşıldı"
-                # Sınır aşılırsa üstel olarak bekle: 5, 8, 11, 14 saniye...
                 time.sleep(5 + (attempt * 3))
                 continue
             else:
@@ -274,7 +270,7 @@ Sadece JSON formatında çıktı ver:
                 time.sleep(2)
         except Exception as exc:
             last_err = f"Bağlantı Koptu: {str(exc)[:40]}"
-            time.sleep(3) # Ağ hatasında bekle ve tekrar dene
+            time.sleep(3)
 
     return {
         "score": 50, 
@@ -829,13 +825,18 @@ def create_excel_output(wb, ws_list, all_funds, common_n_days):
             elif "DÜZELTME" in text: cell.font = yellow_font
             elif "ACİL SAT" in text or "YETERSİZ" in text: cell.font = red_font
 
-    score_cols = [idx for name, idx in header_index.items() if "Skor" in name]
-    for col_idx in score_cols:
-        col_letter = get_column_letter(col_idx)
-        rng = f"{col_letter}2:{col_letter}{ws_scores.max_row}"
-        ws_scores.conditional_formatting.add(rng, CellIsRule(operator="greaterThanOrEqual", formula=["75"], fill=PatternFill(start_color=COLOR_LIGHT_GREEN, fill_type="solid")))
-        ws_scores.conditional_formatting.add(rng, CellIsRule(operator="between", formula=["50", "74"], fill=PatternFill(start_color=COLOR_LIGHT_YELLOW, fill_type="solid")))
-        ws_scores.conditional_formatting.add(rng, CellIsRule(operator="lessThan", formula=["50"], fill=PatternFill(start_color=COLOR_LIGHT_RED, fill_type="solid")))
+    if ws_scores.max_row >= 2:
+        score_cols = [idx for name, idx in header_index.items() if "Skor" in name]
+        rule_green = CellIsRule(operator="greaterThanOrEqual", formula=["75"], fill=PatternFill(start_color=COLOR_LIGHT_GREEN, fill_type="solid"))
+        rule_yellow = CellIsRule(operator="between", formula=["50", "74"], fill=PatternFill(start_color=COLOR_LIGHT_YELLOW, fill_type="solid"))
+        rule_red = CellIsRule(operator="lessThan", formula=["50"], fill=PatternFill(start_color=COLOR_LIGHT_RED, fill_type="solid"))
+
+        for col_idx in score_cols:
+            col_letter = get_column_letter(col_idx)
+            rng = f"{col_letter}2:{col_letter}{ws_scores.max_row}"
+            ws_scores.conditional_formatting.add(rng, rule_green)
+            ws_scores.conditional_formatting.add(rng, rule_yellow)
+            ws_scores.conditional_formatting.add(rng, rule_red)
 
     cur_col, int_col = header_index.get("AUM (₺)"), header_index.get("Yatırımcı")
     pct_cols = [
