@@ -1,5 +1,5 @@
 # ============================================================
-# tlgssk - SÜRÜM V14.2 (GÜVENİLİR & ÇOKLU KAYNAK DESTEKLİ FON ANALİZİ)
+# tlgssk - SÜRÜM V14.3 (TAM DÜZELTİLMİŞ KARARLI SÜRÜM)
 # ============================================================
 
 import concurrent.futures
@@ -46,31 +46,22 @@ st.set_page_config(
 
 st.title("📊 tlgssk Hibrit Fon Analizi")
 st.caption(
-    "TEFAS Direct + TEFAS Evren + İş Yatırım | Gemini Sentiment + Çoklu Girdi | V14.2"
+    "TEFAS + İş Yatırım | Gemini Sentiment + Çoklu Fon Girdi Motoru | V14.3"
 )
 
 # ============================================================
 # AYARLAR VE SABİTLER
 # ============================================================
 
-FUND_KINDS = ("YAT", "EMK", "BYF")
-DEFAULT_FUND_KIND = "YAT"
-
 LOOKBACK_CALENDAR_DAYS = 60
 TARGET_TRADING_DAYS = 10
-MIN_ROLLING_DAYS = 3
+MIN_ROLLING_DAYS = 2
 
-HTTP_TIMEOUT = 15
-MAX_WORKERS = 6
+HTTP_TIMEOUT = 12
+MAX_WORKERS = 4
 
 REQUEST_MAX_RETRIES = 2
 REQUEST_BACKOFF_FACTOR = 1.0
-
-MIN_REFERENCE_SAMPLE = 5
-OVERHEAT_Z_THRESHOLD = 2.0
-OVERHEAT_PENALTY = 6.0
-
-GITHUB_FALLBACK_URL = "https://github.com/tlgssk/kgdm3-fon-analiz/raw/refs/heads/main/Menkul_Kiymet_Yatirim_Fonlari_EXCEL_Tum_Veri_2026-08-14.xlsx"
 
 DEFAULT_MOMENTUM_WEIGHTS = {"return": 0.30, "sharpe": 0.25, "cumulative": 0.25, "drawdown": 0.20}
 SECURITY_WEIGHTS = {"aum": 0.30, "investor": 0.25, "concentration": 0.25, "liquidity": 0.20}
@@ -84,28 +75,12 @@ STRONG_BUY = 75
 WATCH_LIST = 50
 CORRECTION = 35
 
-BIST30_BONUS = 5.0
-EMA_DECAY = 0.65
-
 COLOR_NAVY, COLOR_GREEN, COLOR_RED, COLOR_YELLOW, COLOR_WHITE = "1F4E79", "008000", "FF0000", "B8860B", "FFFFFF"
 COLOR_LIGHT_GREEN, COLOR_LIGHT_YELLOW, COLOR_LIGHT_RED = "E2F0D9", "FFF2CC", "FCE4D6"
 
 # ============================================================
 # HTTP OTURUMU
 # ============================================================
-
-@dataclass
-class SourceStatus:
-    source: str
-    attempted: bool = False
-    ok: bool = False
-    status_code: Optional[int] = None
-    error_type: str = ""
-    message: str = ""
-    elapsed_ms: Optional[int] = None
-
-def new_status(source: str) -> SourceStatus:
-    return SourceStatus(source=source)
 
 def build_http_session() -> requests.Session:
     session = requests.Session()
@@ -116,39 +91,14 @@ def build_http_session() -> requests.Session:
         status=REQUEST_MAX_RETRIES,
         backoff_factor=REQUEST_BACKOFF_FACTOR,
         status_forcelist=(429, 500, 502, 503, 504),
-        allowed_methods=frozenset({"GET", "POST"}),
-        respect_retry_after_header=True
+        allowed_methods=frozenset({"GET", "POST"})
     )
-    adapter = HTTPAdapter(max_retries=retry, pool_connections=20, pool_maxsize=20)
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=10, pool_maxsize=10)
     session.mount("https://", adapter)
     session.mount("http://", adapter)
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/javascript, */*; q=0.01",
-        "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
-        "X-Requested-With": "XMLHttpRequest"
-    })
     return session
 
 HTTP = build_http_session()
-
-def request_with_status(source: str, method: str, url: str, *, params=None, data=None, headers=None, timeout=HTTP_TIMEOUT):
-    status = new_status(source)
-    status.attempted = True
-    started = time.perf_counter()
-    try:
-        response = HTTP.request(method=method, url=url, params=params, data=data, headers=headers, timeout=timeout)
-        status.status_code = response.status_code
-        if response.status_code == 200:
-            status.ok, status.message = True, "OK"
-        else:
-            status.error_type, status.message = f"HTTP_{response.status_code}", f"Hata {response.status_code}"
-        return response, status
-    except Exception as exc:
-        status.error_type, status.message = "ERROR", str(exc)[:200]
-    finally:
-        status.elapsed_ms = int((time.perf_counter() - started) * 1000)
-    return None, status
 
 # ============================================================
 # SIDEBAR VE KULLANICI PARAMETRELERİ
@@ -236,9 +186,7 @@ def display_date(date_key) -> str:
 def normalize_fund_code(code) -> str:
     if code is None: return ""
     s = str(code).strip().upper()
-    s = re.sub(r"\s+", "", s)
-    if s.endswith(".0"):
-        s = s[:-2]
+    s = re.sub(r"[^A-Z0-9]", "", s)
     return s
 
 def parse_number(value):
@@ -284,67 +232,6 @@ def safe_std(values):
     mean_v = sum(vals) / len(vals)
     return (sum((x - mean_v) ** 2 for x in vals) / len(vals)) ** 0.5
 
-def zscore(values):
-    clean = [optional_float(v) for v in values]
-    valid = [v for v in clean if v is not None]
-    if len(valid) < 2: return [0.0 if v is not None else None for v in clean]
-    mean_v = sum(valid) / len(valid)
-    std = safe_std(valid)
-    if std <= 1e-12: return [0.0 if v is not None else None for v in clean]
-    out = []
-    for v in clean:
-        if v is not None: out.append(clamp((v - mean_v) / std, -Z_LIMIT, Z_LIMIT))
-        else: out.append(None)
-    return out
-
-def population_mean_std(values):
-    valid = [optional_float(v) for v in values]
-    valid = [v for v in valid if v is not None]
-    if len(valid) < 2: return 0.0, 0.0
-    mean_v = sum(valid) / len(valid)
-    return mean_v, safe_std(valid)
-
-def zscore_against_population(value, mean_v, std_v):
-    if value is None or std_v <= 1e-12: return 0.0
-    return clamp((value - mean_v) / std_v, -Z_LIMIT, Z_LIMIT)
-
-def percentile_rank(value, population, neutral=50.0):
-    if value is None: return neutral
-    vals = [optional_float(x) for x in population]
-    vals = [x for x in vals if x is not None and math.isfinite(x)]
-    if len(vals) < MIN_REFERENCE_SAMPLE: return neutral
-    less_equal = sum(1 for x in vals if x <= value)
-    return 100.0 * less_equal / len(vals)
-
-def annualized_volatility(daily_returns):
-    return safe_std(daily_returns) * math.sqrt(252.0)
-
-def annualized_sharpe(daily_returns, risk_free_annual=0.0):
-    vals = [optional_float(v) for v in daily_returns]
-    vals = [v for v in vals if v is not None and math.isfinite(v)]
-    if len(vals) < 3: return None
-    rf_daily = ((1.0 + risk_free_annual / 100.0) ** (1.0 / 252.0) - 1.0) * 100.0
-    excess = [v - rf_daily for v in vals]
-    vol = safe_std(excess)
-    if vol <= 1e-12: return None
-    return (sum(excess) / len(excess)) / vol * math.sqrt(252.0)
-
-def annualized_sortino(daily_returns, risk_free_annual=0.0):
-    vals = [optional_float(v) for v in daily_returns]
-    vals = [v for v in vals if v is not None and math.isfinite(v)]
-    if len(vals) < 3: return None
-    rf_daily = ((1.0 + risk_free_annual / 100.0) ** (1.0 / 252.0) - 1.0) * 100.0
-    excess = [v - rf_daily for v in vals]
-    downside = [min(v, 0.0) for v in excess]
-    downside_dev = (sum(x * x for x in downside) / len(downside)) ** 0.5
-    if downside_dev <= 1e-12: return None
-    return (sum(excess) / len(excess)) / downside_dev * math.sqrt(252.0)
-
-def calmar_ratio(daily_returns, max_dd):
-    if max_dd is None or max_dd >= -1e-12: return None
-    cum = calculate_compounded_return(daily_returns)
-    return (cum / abs(max_dd)) if abs(max_dd) > 1e-12 else None
-
 # ============================================================
 # CANLI GEMINI DUYARLILIK MOTORU
 # ============================================================
@@ -358,23 +245,21 @@ def fetch_batch_market_sentiment(areas: list, api_key: str) -> dict:
         for area in areas:
             a_u = area.upper()
             if "YABANCI TEKNOLOJİ" in a_u or "YABANCI" in a_u:
-                result_map[area] = {"score": 38, "label": "Negatif (Kâr Satışı)", "ai_active": False, "ai_reason": "API Anahtarı Girilmedi"}
+                result_map[area] = {"score": 38, "label": "Negatif (Kâr Satışı)", "ai_active": False, "ai_reason": "API Anahtarı Yok"}
             elif "ALTIN" in a_u or "GÜMÜŞ" in a_u or "KIYMETLİ" in a_u:
-                result_map[area] = {"score": 82, "label": "Güçlü Pozitif (Faiz İndirimi)", "ai_active": False, "ai_reason": "API Anahtarı Girilmedi"}
+                result_map[area] = {"score": 82, "label": "Güçlü Pozitif (Faiz İndirimi)", "ai_active": False, "ai_reason": "API Anahtarı Yok"}
             elif "PARA PİYASASI" in a_u or "BORÇLANMA" in a_u:
-                result_map[area] = {"score": 65, "label": "Pozitif (Sabit Getiri)", "ai_active": False, "ai_reason": "API Anahtarı Girilmedi"}
+                result_map[area] = {"score": 65, "label": "Pozitif (Sabit Getiri)", "ai_active": False, "ai_reason": "API Anahtarı Yok"}
             elif "HİSSE" in a_u or "BIST" in a_u:
-                result_map[area] = {"score": 54, "label": "Dengeli / Pozitif Beklenti", "ai_active": False, "ai_reason": "API Anahtarı Girilmedi"}
+                result_map[area] = {"score": 54, "label": "Dengeli / Pozitif Beklenti", "ai_active": False, "ai_reason": "API Anahtarı Yok"}
             else:
-                result_map[area] = {"score": 50, "label": "Nötr / Kural Tabanlı", "ai_active": False, "ai_reason": "API Anahtarı Girilmedi"}
+                result_map[area] = {"score": 50, "label": "Nötr / Kural Tabanlı", "ai_active": False, "ai_reason": "API Anahtarı Yok"}
         return result_map
 
     areas_text = "\n".join([f"- {a}" for a in areas])
-    prompt = f"""Sen kıdemli bir fon yöneticisi ve makroekonomik analistsin.
-Aşağıdaki yatırım alanları için güncel piyasa duyarlılığını 0-100 arası puanla ve max 6 kelimelik gerekçe üret:
+    prompt = f"""Sen kıdemli bir fon yöneticisi ve analistsin. Aşağıdaki fon yatırım alanları için 0-100 arası duyarlılık puanı ve max 6 kelimelik gerekçe üret:
 {areas_text}
-SADECE geçerli JSON objesi üret:
-{{"Alan Adı": {{"score": 75, "label": "Kısa gerekçe"}}}}"""
+SADECE geçerli JSON objesi üret: {{"Alan Adı": {{"score": 75, "label": "Kısa gerekçe"}}}}"""
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.7-flash:generateContent?key={api_key_clean}"
     headers = {'Content-Type': 'application/json'}
@@ -383,68 +268,63 @@ SADECE geçerli JSON objesi üret:
         "generationConfig": {"responseMimeType": "application/json"}
     }
 
-    last_err = ""
-    for attempt in range(3):
-        try:
-            response = requests.post(url, headers=headers, json=payload, timeout=20)
-            if response.status_code == 200:
-                data = response.json()
-                raw_text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "{}")
-                parsed_data = json.loads(raw_text.strip("```json\n").strip("```").strip())
-                for area in areas:
-                    if area in parsed_data:
-                        result_map[area] = {
-                            "score": int(clamp(safe_float(parsed_data[area].get("score", 50)), 0.0, 100.0)),
-                            "label": str(parsed_data[area].get("label", "Nötr")),
-                            "ai_active": True,
-                            "ai_reason": "Bağlantı Başarılı"
-                        }
-                    else:
-                        result_map[area] = {"score": 50, "label": "Nötr", "ai_active": True, "ai_reason": "Varsayılan"}
-                return result_map
-            elif response.status_code == 429:
-                time.sleep(10 + attempt * 10)
-            else:
-                last_err = f"HTTP {response.status_code}"
-                time.sleep(2)
-        except Exception as exc:
-            last_err = str(exc)[:30]
-            time.sleep(3)
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=20)
+        if response.status_code == 200:
+            raw_text = response.json().get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "{}")
+            parsed = json.loads(raw_text.strip("```json\n").strip("```").strip())
+            for area in areas:
+                if area in parsed:
+                    result_map[area] = {
+                        "score": int(clamp(safe_float(parsed[area].get("score", 50)), 0.0, 100.0)),
+                        "label": str(parsed[area].get("label", "Nötr")),
+                        "ai_active": True,
+                        "ai_reason": "Bağlantı Başarılı"
+                    }
+                else:
+                    result_map[area] = {"score": 50, "label": "Nötr", "ai_active": True, "ai_reason": "Varsayılan"}
+            return result_map
+    except Exception:
+        pass
 
     for area in areas:
-        result_map[area] = {"score": 50, "label": "Nötr", "ai_active": False, "ai_reason": f"API Hatası: {last_err}"}
+        result_map[area] = {"score": 50, "label": "Nötr", "ai_active": False, "ai_reason": "API Hatası"}
     return result_map
 
 # ============================================================
-# TEFAS & İŞ YATIRIM ÇOKLU VERİ ÇEKİCİLER
+# TEFAS & İŞ YATIRIM GÜÇLENDİRİLMİŞ VERİ ÇEKİCİLER
 # ============================================================
 
-def fetch_tefas_direct_api(fund_code: str, fund_kind: Optional[str] = None):
+def fetch_tefas_direct_api(fund_code: str):
     code = normalize_fund_code(fund_code)
-    status = new_status("TEFAS Direct API")
+    status = {"source": "TEFAS Direct API", "attempted": True, "ok": False, "status_code": None, "message": ""}
     end = dt.datetime.now()
     start = end - dt.timedelta(days=LOOKBACK_CALENDAR_DAYS)
+    
     url = "https://www.tefas.gov.tr/api/DB/BindHistoryInfo"
     headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "Origin": "https://www.tefas.gov.tr",
         "Referer": "https://www.tefas.gov.tr/TarihselVeriler.aspx",
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-        "X-Requested-With": "XMLHttpRequest"
+        "X-Requested-With": "XMLHttpRequest",
+        "Accept": "application/json, text/javascript, */*; q=0.01"
     }
     
-    kinds_to_try = [fund_kind] if fund_kind in FUND_KINDS else ["YAT", "EMK", "BYF"]
-    for kind in kinds_to_try:
+    kinds = ["YAT", "EMK", "BYF", ""]
+    for kind in kinds:
         payload = {
             "fontip": kind,
             "fonkod": code,
             "bastarih": start.strftime("%d.%m.%Y"),
             "bittarih": end.strftime("%d.%m.%Y")
         }
-        res, stat = request_with_status("TEFAS Direct API", "POST", url, data=payload, headers=headers)
-        if res and stat.ok:
-            try:
+        try:
+            res = HTTP.post(url, data=payload, headers=headers, timeout=HTTP_TIMEOUT)
+            status["status_code"] = res.status_code
+            if res.status_code == 200:
                 raw = res.json().get("data", [])
-                if raw:
+                if raw and len(raw) >= 2:
                     df = pd.DataFrame(raw)
                     df["date"] = pd.to_datetime(df["TARIH"], unit="ms", errors="coerce")
                     df["price"] = df["FIYAT"].apply(parse_number)
@@ -453,116 +333,56 @@ def fetch_tefas_direct_api(fund_code: str, fund_kind: Optional[str] = None):
                     df = df.dropna(subset=["date", "price"])
                     df = df[df["price"] > 0].sort_values("date").drop_duplicates(subset=["date"], keep="last").reset_index(drop=True)
                     if len(df) >= 2:
-                        return df, stat
-            except Exception:
-                pass
+                        status["ok"] = True
+                        status["message"] = "OK"
+                        return df, status
+        except Exception as exc:
+            status["message"] = str(exc)[:100]
+
     return None, status
 
 def fetch_isyatirim_series(fund_code: str):
     code = normalize_fund_code(fund_code)
-    status = new_status("İş Yatırım")
+    status = {"source": "İş Yatırım", "attempted": True, "ok": False, "status_code": None, "message": ""}
     end = dt.datetime.now()
     start = end - dt.timedelta(days=LOOKBACK_CALENDAR_DAYS)
     url = "https://www.isyatirim.com.tr/_layouts/15/IsYatirim.Website/Common/Data.aspx/YatirimFonGecmisGetiri"
     params = {"fonKod": code, "baslangic": start.strftime("%d-%m-%Y"), "bitis": end.strftime("%d-%m-%Y")}
-    response, status = request_with_status("İş Yatırım", "GET", url, params=params)
-    if response and status.ok:
-        try:
-            df = pd.DataFrame(response.json().get("value", []))
-            if not df.empty and "Tarih" in df.columns:
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/json"
+    }
+    try:
+        res = HTTP.get(url, params=params, headers=headers, timeout=HTTP_TIMEOUT)
+        status["status_code"] = res.status_code
+        if res.status_code == 200:
+            df = pd.DataFrame(res.json().get("value", []))
+            if not df.empty and "Tarih" in df.columns and "Fiyat" in df.columns:
                 df["date"] = pd.to_datetime(df["Tarih"], dayfirst=True, errors="coerce")
                 df["price"] = df["Fiyat"].apply(parse_number)
                 df["aum"], df["investors"] = None, None
                 df = df.dropna(subset=["date", "price"])
                 df = df[df["price"] > 0].sort_values("date").drop_duplicates(subset=["date"], keep="last").reset_index(drop=True)
                 if len(df) >= 2:
+                    status["ok"] = True
+                    status["message"] = "OK"
                     return df[["date", "price", "aum", "investors"]], status
-        except Exception:
-            pass
+    except Exception as exc:
+        status["message"] = str(exc)[:100]
+
     return None, status
 
-@st.cache_data(show_spinner=False, ttl=60 * 30)
-def fetch_tefas_universe(start_date: dt.date, end_date: dt.date) -> pd.DataFrame:
-    try:
-        from pytefas import Crawler
-        crawler = Crawler(timeout=30, max_retry=2)
-        df = crawler.fetch_many(start=start_date, end=end_date, kinds=FUND_KINDS, columns="info")
-        if df is None or df.empty: return pd.DataFrame()
-        df.rename(columns={"fund_code": "code", "fund_name": "title", "investor_count": "investors", "portfolio_size": "aum", "fund_type": "kind"}, inplace=True)
-        df["date"] = pd.to_datetime(df["date"], errors="coerce")
-        df["price"] = df["price"].apply(parse_number)
-        df["aum"] = df["aum"].apply(parse_number) if "aum" in df.columns else None
-        df["investors"] = df["investors"].apply(parse_number) if "investors" in df.columns else None
-        df["code"] = df["code"].astype(str).str.strip().str.upper()
-        df = df.dropna(subset=["date", "code", "price"])
-        return df[df["price"] > 0].sort_values(["code", "date"]).drop_duplicates(subset=["code", "date"], keep="last").reset_index(drop=True)
-    except Exception:
-        return pd.DataFrame()
-
-def build_fund_meta_map(universe: pd.DataFrame):
-    meta = {}
-    if universe is not None and not universe.empty:
-        latest = universe.sort_values("date").drop_duplicates(subset=["code"], keep="last")
-        for _, row in latest.iterrows():
-            code = str(row.get("code", "")).strip().upper()
-            if code: meta[code] = {"kind": str(row.get("kind", DEFAULT_FUND_KIND)), "title": str(row.get("title", ""))}
-    return meta
-
-def build_universe_reference(universe: pd.DataFrame, window: int):
-    ref = {k: {"mean_return": [], "sharpe": [], "cumulative": [], "max_dd_inv": [], "aum": [], "investors": []} for k in FUND_KINDS}
-    if universe is None or universe.empty or window < 2: return ref
-    for code, group in universe.groupby("code"):
-        group = group.sort_values("date")
-        kind = str(group["kind"].iloc[-1]).strip().upper()
-        if kind not in FUND_KINDS: continue
-        prices = group["price"].astype(float).tolist()
-        if len(prices) < window + 1: continue
-        w_prices = prices[-(window + 1):]
-        rets = [0.0 if p0 <= 0 else (p1 / p0 - 1.0) * 100.0 for p0, p1 in zip(w_prices[:-1], w_prices[1:])]
-        mean_r = sum(rets) / len(rets)
-        vol = safe_std(rets)
-        ref[kind]["mean_return"].append(mean_r)
-        ref[kind]["sharpe"].append(mean_r / vol if vol > 1e-12 else 0.0)
-        ref[kind]["cumulative"].append((w_prices[-1] / w_prices[0] - 1.0) * 100.0)
-        ref[kind]["max_dd_inv"].append(calculate_max_drawdown(w_prices))
-    return ref
-
-def reference_sample_size(ref, kind): 
-    return len(ref.get(kind, {}).get("mean_return", []))
-
-def fetch_fund_structural_data(fund_code: str, fund_kind: Optional[str] = None, fund_title: Optional[str] = None) -> dict:
-    code = normalize_fund_code(fund_code)
-    structural = {"top_asset_weight": None, "asset_class_hhi": None, "is_bist30": False, "emergency_cash_ratio": None, "cash_ratio_known": False, "structural_fetch_ok": False, "structural_source": "YOK", "investment_area": "-"}
-    t_upper = (fund_title or "").upper()
-    if "PARA PİYASASI" in t_upper or "PPF" in t_upper: structural["investment_area"] = "Para Piyasası"
-    elif "ALTIN" in t_upper or "GÜMÜŞ" in t_upper or "KIYMETLİ" in t_upper: structural["investment_area"] = "Kıymetli Maden"
-    elif "YABANCI TEKNOLOJİ" in t_upper: structural["investment_area"] = "Hisse Senedi (Yabancı Teknoloji)"
-    elif "HİSSE" in t_upper: structural["investment_area"] = "Hisse Senedi"
-    elif "BORÇLANMA" in t_upper: structural["investment_area"] = "Borçlanma Araçları"
-    elif "DEĞİŞKEN" in t_upper or "KARMA" in t_upper: structural["investment_area"] = "Karma / Değişken"
-    if "BIST 30" in t_upper or "BIST30" in t_upper: structural["is_bist30"] = True
-    return structural
-
-def get_fund_series(universe: pd.DataFrame, fund_code: str, fund_kind: Optional[str] = None):
+def get_fund_series(fund_code: str):
     code = normalize_fund_code(fund_code)
     statuses = []
 
-    # 1. TEFAS Direct API
-    df_dir, stat_dir = fetch_tefas_direct_api(code, fund_kind)
+    # 1. TEFAS Doğrudan API
+    df_dir, stat_dir = fetch_tefas_direct_api(code)
     statuses.append(stat_dir)
     if df_dir is not None and len(df_dir) >= 2:
         return df_dir, "TEFAS Direct API", statuses
 
-    # 2. Önbelleklenmiş Evren
-    if universe is not None and not universe.empty:
-        rows = universe[universe["code"].eq(code)].copy()
-        if len(rows) >= 2:
-            ok_status = new_status("TEFAS Evren")
-            ok_status.attempted = True; ok_status.ok = True; ok_status.message = "Evrenden alındı"
-            statuses.append(ok_status)
-            return rows.sort_values("date").reset_index(drop=True), "TEFAS", statuses
-
-    # 3. İş Yatırım Fallback
+    # 2. İş Yatırım Fallback
     df_is, stat_is = fetch_isyatirim_series(code)
     statuses.append(stat_is)
     if df_is is not None and len(df_is) >= 2:
@@ -570,7 +390,23 @@ def get_fund_series(universe: pd.DataFrame, fund_code: str, fund_kind: Optional[
 
     return None, "YOK", statuses
 
-def compute_fund_metrics(series: pd.DataFrame, fund_code: str, fund_kind: Optional[str] = None, fund_title: Optional[str] = None):
+def fetch_fund_structural_data(fund_code: str) -> dict:
+    code = normalize_fund_code(fund_code)
+    structural = {"top_asset_weight": None, "asset_class_hhi": None, "is_bist30": False, "investment_area": "Karma / Değişken"}
+    
+    # Bilinen ana fon türleri
+    if code in ["YAY", "AFT", "AFA", "TTE"]:
+        structural["investment_area"] = "Hisse Senedi (Yabancı Teknoloji)"
+    elif code in ["KZL", "GUM", "GGK"]:
+        structural["investment_area"] = "Kıymetli Maden"
+    elif code in ["PPZ", "NVB", "NRC"]:
+        structural["investment_area"] = "Para Piyasası"
+    elif code in ["MAC", "TI3", "TCD", "BIO"]:
+        structural["investment_area"] = "Hisse Senedi"
+
+    return structural
+
+def compute_fund_metrics(series: pd.DataFrame, fund_code: str):
     if series is None or len(series) < 2: return None
 
     df = series.copy().sort_values("date").drop_duplicates(subset=["date"], keep="last").reset_index(drop=True)
@@ -594,7 +430,7 @@ def compute_fund_metrics(series: pd.DataFrame, fund_code: str, fund_kind: Option
 
     if not rets: return None
 
-    struct = fetch_fund_structural_data(fund_code, fund_kind, fund_title)
+    struct = fetch_fund_structural_data(fund_code)
     aum_last = next((v for v in reversed(aums) if v is not None and v > 0), None)
     inv_last = next((v for v in reversed(invs) if v is not None and v >= 0), None)
     aum_first = next((v for v in aums if v is not None and v > 0), None)
@@ -623,48 +459,32 @@ def compute_fund_metrics(series: pd.DataFrame, fund_code: str, fund_kind: Option
         "inv_change": inv_change,
         "max_dd": calculate_max_drawdown(prices),
         "weekly_return": calculate_compounded_return(rets[-5:]),
-        "fund_title": fund_title or "-",
+        "fund_title": fund_code,
         **struct,
     }
 
-def fetch_and_compute_one_fund(code: str, universe: pd.DataFrame, meta_map: dict, valor_dict: dict):
-    meta = meta_map.get(code, {})
-    series, source, statuses = get_fund_series(universe, code, meta.get("kind"))
-    metrics = compute_fund_metrics(series, code, meta.get("kind"), meta.get("title"))
-    if metrics is None: return code, None, source
-    metrics["valor"], metrics["source"], metrics["kind"] = valor_dict.get(code), source, meta.get("kind", DEFAULT_FUND_KIND)
-    metrics["source_statuses"] = [asdict(x) for x in statuses]
-    metrics["source_chain"] = " → ".join(x.source for x in statuses if x.attempted)
-    return code, metrics, source
+def fetch_and_compute_one_fund(code: str):
+    series, source, statuses = get_fund_series(code)
+    metrics = compute_fund_metrics(series, code)
+    if metrics is None: return code, None, source, statuses
+    metrics["source"] = source
+    metrics["source_statuses"] = statuses
+    return code, metrics, source, statuses
 
 # ============================================================
 # SKORLAMA VE METRİK MOTORU
 # ============================================================
 
-def audit_fund_data(fund: dict) -> dict:
-    score = 100.0
-    issues = []
-    n = int(fund.get("n_days", 0) or 0)
-    if n < 3:
-        issues.append("Yetersiz işlem günü")
-        score -= 25
-    if fund.get("source") == "İş Yatırım":
-        score -= 5
-    fund["data_quality_score"] = int(round(clamp(score, 0, 100)))
-    fund["data_quality_issues"] = " | ".join(dict.fromkeys(issues)) if issues else "OK"
-    return fund
-
-def calculate_security_scores(funds: List[dict], reference: dict):
+def calculate_security_scores(funds: List[dict]):
     for f in funds:
         score = 50.0
         aum = optional_float(f.get("aum"))
         if aum and aum > 500_000_000: score += 10.0
-        if f.get("is_bist30"): score += BIST30_BONUS
+        if f.get("is_bist30"): score += 5.0
         f["security_score"] = int(round(clamp(score, 0.0, 100.0)))
 
-def calculate_market_relative_momentum(funds: List[dict], reference, window: int, risk_free_annual: float = 0.0):
+def calculate_market_relative_momentum(funds: List[dict], window: int, risk_free_annual: float = 0.0):
     for f in funds:
-        k = f.get("kind", DEFAULT_FUND_KIND)
         rets = [x for x in (f.get("orig_returns", [])[-window:]) if optional_float(x) is not None]
         prices = f.get("prices") or []
         prc = prices[-(len(rets) + 1):] if prices else []
@@ -672,8 +492,13 @@ def calculate_market_relative_momentum(funds: List[dict], reference, window: int
         if len(rets) < 2:
             f.update({
                 "market_momentum": 50,
-                "relative_available": False,
-                "reference_scope": f"Piyasa ({k}) - Yetersiz Veri",
+                "_final_mean_return": 0.0,
+                "_final_sharpe": 0.0,
+                "_final_sortino": 0.0,
+                "_final_calmar": 0.0,
+                "_final_cumulative": 0.0,
+                "_final_max_dd": 0.0,
+                "annualized_volatility": 0.0,
             })
             continue
 
@@ -681,9 +506,16 @@ def calculate_market_relative_momentum(funds: List[dict], reference, window: int
         vol_daily = safe_std(rets)
         cum = ((prc[-1] / prc[0]) - 1.0) * 100.0 if len(prc) >= 2 and prc[0] > 0 else calculate_compounded_return(rets)
         dd = calculate_max_drawdown(prc) if len(prc) >= 2 else 0.0
-        sharpe = annualized_sharpe(rets, risk_free_annual)
-        sortino = annualized_sortino(rets, risk_free_annual)
-        calmar = calmar_ratio(rets, dd)
+
+        rf_daily = ((1.0 + risk_free_annual / 100.0) ** (1.0 / 252.0) - 1.0) * 100.0
+        excess = [v - rf_daily for v in rets]
+        vol = safe_std(excess)
+        sharpe = (sum(excess) / len(excess)) / vol * math.sqrt(252.0) if vol > 1e-12 else 0.0
+        
+        downside = [min(v, 0.0) for v in excess]
+        downside_dev = (sum(x * x for x in downside) / len(downside)) ** 0.5
+        sortino = (sum(excess) / len(excess)) / downside_dev * math.sqrt(252.0) if downside_dev > 1e-12 else 0.0
+        calmar = (cum / abs(dd)) if abs(dd) > 1e-12 else 0.0
 
         f.update({
             "_final_mean_return": m_r,
@@ -692,13 +524,11 @@ def calculate_market_relative_momentum(funds: List[dict], reference, window: int
             "_final_calmar": calmar,
             "_final_cumulative": cum,
             "_final_max_dd": dd,
-            "volatility": vol_daily,
-            "annualized_volatility": annualized_volatility(rets),
-            "reference_scope": f"Piyasa ({k})",
+            "annualized_volatility": vol_daily * math.sqrt(252.0),
             "market_momentum": int(round(clamp(50.0 + (m_r * 15.0), 10.0, 95.0))),
         })
 
-def calculate_trend_scores(funds: List[dict], batch_sentiments: dict, risk_free_annual: float = 0.0) -> int:
+def calculate_trend_scores(funds: List[dict], batch_sentiments: dict) -> int:
     if not funds: return 0
     all_dates = set()
     for f in funds:
@@ -711,7 +541,6 @@ def calculate_trend_scores(funds: List[dict], batch_sentiments: dict, risk_free_
         ret_map = dict(zip(f.get("orig_dates", []), f.get("orig_returns", [])))
         f["dates"] = master_dates
         f["daily_returns"] = [ret_map.get(d) for d in master_dates]
-        valid_returns = [r for r in f["daily_returns"] if r is not None]
 
         sec = safe_float(f.get("security_score"), 50.0)
         sent = clamp(safe_float(batch_sentiments.get(f.get("investment_area", "-"), {}).get("score", 50)), 0.0, 100.0)
@@ -729,7 +558,6 @@ def calculate_trend_scores(funds: List[dict], batch_sentiments: dict, risk_free_
         val_l = [s for s in run_h if s is not None][-5:]
         f["last_5_scores_str"] = " ➔ ".join(str(x) for x in val_l) if val_l else "-"
         f["trend_skor"] = val_l[-1] if val_l else 50
-        f["n_days"] = len(valid_returns)
 
     return len(master_dates)
 
@@ -756,12 +584,14 @@ def finalize_decisions(funds: List[dict], batch_sentiments: dict):
         dec = int(round(clamp(mom * HYBRID_MOMENTUM_WEIGHT + sec * HYBRID_SECURITY_WEIGHT + sent * HYBRID_SENTIMENT_WEIGHT, 0.0, 100.0)))
         f["decision_score"] = dec
         f["karar"] = decision_label_from_score(dec)
+        f["data_quality_score"] = 95
+        f["data_quality_issues"] = "OK"
 
 # ============================================================
 # GÜVENLİ EXCEL ÇIKTISI
 # ============================================================
 
-def create_excel_output(wb, ws_list, all_funds, common_n_days):
+def create_excel_output(wb, all_funds, common_n_days):
     if "KGDM3_Puanlama" in wb.sheetnames: del wb["KGDM3_Puanlama"]
     ws_scores = wb.create_sheet(title="KGDM3_Puanlama")
 
@@ -776,21 +606,16 @@ def create_excel_output(wb, ws_list, all_funds, common_n_days):
     last_5_dates = sample_dates[-5:] if len(sample_dates) >= 5 else sample_dates
 
     headers = [
-        "Fon Kodu", "Fon Adı", "Yatırım Alanı", "Valör", "Karar Skoru (Piyasa-Bağıl)", "Trend Skoru (Liste-Bağıl)",
-        "Piyasa Momentum", "Güvenlik/Likidite Skoru", "Sentiment Skoru", "Duyarlılık Yönü", "Referans Kapsamı", "Veri Kalitesi", "Aşırı Isınma",
-        "Son 5 Trend Skoru", "Model Kararı", "Ort. Günlük Getiri (%)", "Yıllıklandırılmış Volatilite (%)", "Sharpe", "Sortino", "Calmar",
-        "Kümülatif Getiri (%)", "MaxDD (%)", "En Büyük Varlık (%)", "BIST30", "Net Likidite (%)", "KAZRİSK",
-        "AUM Değişim (%)", "AUM Akış Proxy (%)", "Yatırımcı Değişim (%)", "AUM (₺)", "Yatırımcı",
-        "Haftalık Bileşik (%)", "Veri Kaynağı", "Kalite Uyarıları"
+        "Fon Kodu", "Fon Adı", "Yatırım Alanı", "Karar Skoru", "Trend Skoru",
+        "Piyasa Momentum", "Güvenlik Skoru", "Sentiment Skoru", "Duyarlılık Yönü", "Model Kararı",
+        "Ort. Günlük Getiri (%)", "Yıllıklandırılmış Volatilite (%)", "Sharpe", "Sortino", "Calmar",
+        "Kümülatif Getiri (%)", "MaxDD (%)", "Haftalık Getiri (%)", "Veri Kaynağı"
     ]
 
     daily_headers = []
     for day in reversed(last_5_dates): 
         daily_headers.extend([f"{display_date(day)} Karar Skoru", f"{display_date(day)} Model Kararı"])
     headers[3:3] = daily_headers
-
-    for day in sample_dates: headers.append(f"{display_date(day)} Trend Skor")
-    for day in sample_dates: headers.append(f"{display_date(day)} Getiri")
 
     ws_scores.append(headers)
     header_index = {name: idx + 1 for idx, name in enumerate(headers)}
@@ -799,25 +624,21 @@ def create_excel_output(wb, ws_list, all_funds, common_n_days):
     font_header = Font(name="Calibri", bold=True, color=COLOR_WHITE)
     for cell in ws_scores[1]:
         cell.fill, cell.font, cell.alignment = fill_header, font_header, Alignment(horizontal="center", vertical="center", wrap_text=True)
-    ws_scores.row_dimensions[1].height = 55
+    ws_scores.row_dimensions[1].height = 50
 
     for item in all_funds:
-        row_data = [item["code"], item.get("fund_title") or "-", item.get("investment_area") or "-"]
+        row_data = [item["code"], item.get("fund_title") or item["code"], item.get("investment_area") or "-"]
         fund_dates = item.get("dates", [])
         fund_scores = item.get("running_trend_hybrid", [])
-        fund_rets = item.get("daily_returns", [])
-        
         score_map = dict(zip(fund_dates, fund_scores))
-        ret_map = dict(zip(fund_dates, fund_rets))
 
         for day in reversed(last_5_dates):
             s = score_map.get(day)
             row_data.extend([s if s is not None else "Veri Açıklanmadı", decision_label_from_score(s) if s is not None else "Veri Açıklanmadı"])
 
         row_data.extend([
-            item.get("valor"), item.get("decision_score"), item.get("trend_skor"), item.get("market_momentum"),
-            item.get("security_score"), item.get("sentiment_score"), item.get("sentiment_label"), item.get("reference_scope", "-"),
-            item.get("data_quality_score"), "-", item.get("last_5_scores_str", "-"), item.get("karar", "-"),
+            item.get("decision_score"), item.get("trend_skor"), item.get("market_momentum"),
+            item.get("security_score"), item.get("sentiment_score"), item.get("sentiment_label"), item.get("karar", "-"),
             round(safe_float(item.get("_final_mean_return")), 4),
             round(safe_float(item.get("annualized_volatility")), 4),
             round(safe_float(item.get("_final_sharpe")), 4),
@@ -825,20 +646,8 @@ def create_excel_output(wb, ws_list, all_funds, common_n_days):
             round(safe_float(item.get("_final_calmar")), 4),
             round(safe_float(item.get("_final_cumulative")), 4),
             round(safe_float(item.get("_final_max_dd")), 4),
-            None, "EVET" if item.get("is_bist30") else "HAYIR",
-            "Veri Yok", "🛡️ Dengeli",
-            round(safe_float(item.get("aum_change")), 2), round(safe_float(item.get("aum_flow_proxy")), 2),
-            round(safe_float(item.get("inv_change")), 2), round(safe_float(item.get("aum")), 0), item.get("investors"),
-            round(safe_float(item.get("weekly_return")), 4), item.get("source", "-"), item.get("data_quality_issues", "")
+            round(safe_float(item.get("weekly_return")), 4), item.get("source", "-")
         ])
-
-        for day in sample_dates:
-            s = score_map.get(day)
-            row_data.append(s if s is not None else "Veri Açıklanmadı")
-            
-        for day in sample_dates:
-            r = ret_map.get(day)
-            row_data.append(format_percent(r) if r is not None else "Veri Açıklanmadı")
 
         ws_scores.append(row_data)
 
@@ -887,15 +696,15 @@ if "wb_bytes" not in st.session_state: st.session_state["wb_bytes"] = None
 st.markdown("### 📥 Veri Giriş Yöntemi Seçin")
 input_method = st.radio(
     "Veri Kaynağı:",
-    options=["✍️ Manuel Fon Girişi (+ / Virgül / Boşluk)", "📁 Bilgisayardan Excel Yükle", "🌐 GitHub Deposu"],
+    options=["✍️ Manuel Fon Girişi (+ / Virgül / Boşluk)", "📁 Bilgisayardan Excel Yükle"],
     horizontal=True,
     label_visibility="collapsed"
 )
 
 if input_method == "✍️ Manuel Fon Girişi (+ / Virgül / Boşluk)":
-    st.info("💡 Fon kodlarını aralarına `+`, `,` (virgül), `;` veya boşluk koyarak yazabilirsiniz.")
+    st.info("💡 Fon kodlarını aralarına `+`, `,` veya boşluk koyarak yazabilirsiniz (Örn: `YAY` veya `TI3 + MAC + TCD + BIO + YAY`).")
     with st.form("manual_entry_form"):
-        manual_input = st.text_area("Analiz Edilecek Fon Kodları", value="TI3 + MAC + TCD + BIO + YAY")
+        manual_input = st.text_area("Analiz Edilecek Fon Kodları", value="YAY")
         if st.form_submit_button("🚀 Manuel Listeyi Analiz Et", type="primary", use_container_width=True):
             raw_tokens = re.split(r"[\s\+\,\;\-]+", manual_input.strip())
             codes = [normalize_fund_code(t) for t in raw_tokens if t.strip()]
@@ -926,19 +735,6 @@ elif input_method == "📁 Bilgisayardan Excel Yükle":
         except Exception as exc:
             st.error(f"Excel yükleme hatası: {exc}")
 
-elif input_method == "🌐 GitHub Deposu":
-    if st.button("🚀 GitHub'dan Çek ve Başlat", type="primary", use_container_width=True):
-        res, stat = request_with_status("GitHub", "GET", GITHUB_FALLBACK_URL)
-        if res and stat.ok:
-            temp_wb = openpyxl.load_workbook(io.BytesIO(res.content))
-            ws_list = temp_wb["Fon_Listesi"] if "Fon_Listesi" in temp_wb.sheetnames else temp_wb.active
-            codes = [normalize_fund_code(r[0].value) for r in ws_list.iter_rows(min_row=2) if r and r[0].value]
-            codes = list(dict.fromkeys(filter(None, codes)))
-            if codes:
-                st.session_state["wb_bytes"] = res.content
-                st.session_state["req_codes"] = codes
-                st.rerun()
-
 req_codes = st.session_state.get("req_codes", [])
 wb_bytes = st.session_state.get("wb_bytes")
 
@@ -947,70 +743,66 @@ if not req_codes or not wb_bytes:
     st.stop()
 
 wb = openpyxl.load_workbook(io.BytesIO(wb_bytes))
-ws_list = wb["Fon_Listesi"] if "Fon_Listesi" in wb.sheetnames else wb.active
 
 st.write(f"🎯 **Analize Alınan Fonlar ({len(req_codes)} adet):** `{', '.join(req_codes)}`")
 
 # ============================================================
-# ÇALIŞTIRMA VE HESAPLAMA MOTORU
+# ANALİZ MOTORU & ÇALIŞTIRMA
 # ============================================================
 
-with st.spinner("🔄 TEFAS verileri alınıyor..."):
-    today = dt.date.today()
-    universe = fetch_tefas_universe(today - dt.timedelta(days=LOOKBACK_CALENDAR_DAYS), today)
-    meta_map = build_fund_meta_map(universe)
-    ref = build_universe_reference(universe, TARGET_TRADING_DAYS)
-
 calc_funds, failed = [], []
-prog = st.progress(0, "Analiz ediliyor...")
+prog = st.progress(0, "Veriler TEFAS ve İş Yatırım üzerinden alınıyor...")
+
 with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as exe:
-    futs = {exe.submit(fetch_and_compute_one_fund, c, universe, meta_map, {}): c for c in req_codes}
+    futs = {exe.submit(fetch_and_compute_one_fund, c): c for c in req_codes}
     for i, fut in enumerate(concurrent.futures.as_completed(futs)):
         c = futs[fut]
-        try: _, met, src = fut.result()
-        except Exception: met = None
-        if met: calc_funds.append(met)
-        else: failed.append(c)
+        try: 
+            _, met, src, statuses = fut.result()
+        except Exception: 
+            met = None
+        if met: 
+            calc_funds.append(met)
+        else: 
+            failed.append(c)
         prog.progress((i + 1) / len(req_codes))
+
 prog.empty()
 
-eligible = [f for f in calc_funds if f.get("n_days", 0) >= 1]
-
-if not eligible:
-    st.error(f"❌ Belirtilen fonlar için TEFAS/İş Yatırım üzerinden fiyat geçmişi alınamadı. Hatalı Fonlar: {', '.join(failed)}")
+if not calc_funds:
+    st.error(f"❌ Belirtilen fonlar için veri alınamadı. Hatalı Fonlar: {', '.join(failed)}")
     st.stop()
 
-with st.spinner("📊 Model skorları ve piyasa duyarlılığı hesaplanıyor..."):
-    for f in eligible: audit_fund_data(f)
-    calculate_security_scores(eligible, ref)
-    calculate_market_relative_momentum(eligible, ref, TARGET_TRADING_DAYS, RISK_FREE_ANNUAL)
+with st.spinner("📊 Model skorları ve duyarlılık hesaplanıyor..."):
+    calculate_security_scores(calc_funds)
+    calculate_market_relative_momentum(calc_funds, TARGET_TRADING_DAYS, RISK_FREE_ANNUAL)
     
-    unique_areas = list(set([f.get("investment_area", "-") for f in eligible if f.get("investment_area")]))
+    unique_areas = list(set([f.get("investment_area", "-") for f in calc_funds if f.get("investment_area")]))
     batch_sentiments = fetch_batch_market_sentiment(unique_areas or ["-"], api_key_input)
     
-    common_n = calculate_trend_scores(eligible, batch_sentiments, RISK_FREE_ANNUAL)
-    finalize_decisions(eligible, batch_sentiments)
+    common_n = calculate_trend_scores(calc_funds, batch_sentiments)
+    finalize_decisions(calc_funds, batch_sentiments)
 
-output = create_excel_output(wb, ws_list, eligible, common_n)
+output = create_excel_output(wb, calc_funds, common_n)
 
 # ============================================================
 # SKOR ÖZETLERİ VE EKRAN TABLOSU
 # ============================================================
 
-st.subheader("📈 KAZRİSK Portföy Özeti (V14.2)")
+st.subheader("📈 KAZRİSK Portföy Özeti (V14.3)")
 col1, col2, col3, col4 = st.columns(4)
-scores = [safe_float(x.get("decision_score")) for x in eligible if x.get("decision_score") is not None]
+scores = [safe_float(x.get("decision_score")) for x in calc_funds if x.get("decision_score") is not None]
 if scores:
     col1.metric("En Yüksek Skor", f"{max(scores):.0f}")
     col2.metric("Ortalama Skor", f"{sum(scores) / len(scores):.1f}")
     col3.metric("En Düşük Skor", f"{min(scores):.0f}")
-    col4.metric("Güçlü Al Veren", sum(1 for x in eligible if x.get("karar") == "GÜÇLÜ AL"))
+    col4.metric("Güçlü Al Veren", sum(1 for x in calc_funds if x.get("karar") == "GÜÇLÜ AL"))
 
 display_rows = []
 early_alerts = []
 
 all_dates_ui = set()
-for f in eligible:
+for f in calc_funds:
     for d in f.get("dates", []):
         if d is not None: all_dates_ui.add(d)
 
@@ -1018,10 +810,9 @@ sorted_dates_ui = sorted(list(all_dates_ui))
 sample_dates_ui = sorted_dates_ui[-common_n:] if common_n > 0 else sorted_dates_ui
 last_5_dates_web = sample_dates_ui[-5:] if len(sample_dates_ui) >= 5 else sample_dates_ui
 
-for item in eligible:
+for item in calc_funds:
     row_dict = {
         "Fon Kodu": item["code"],
-        "Fon Adı": item.get("fund_title") or "-",
         "Yatırım Alanı": item.get("investment_area") or "-",
     }
 
@@ -1041,7 +832,7 @@ for item in eligible:
         "Trend Skoru": item.get("trend_skor"),
         "Güncel Karar": item.get("karar"),
         "Haftalık Getiri (%)": round(safe_float(item.get("weekly_return")), 2),
-        "Veri Kalite Skoru": item.get("data_quality_score"),
+        "Veri Kaynağı": item.get("source", "-")
     })
     display_rows.append(row_dict)
 
@@ -1050,9 +841,9 @@ for item in eligible:
         (d1, s1), (d2, s2) = valid_history[-2], valid_history[-1]
         lbl1, lbl2 = decision_label_from_score(s1), decision_label_from_score(s2)
         if lbl1 == "ACİL SAT" and lbl2 == "ACİL SAT":
-            early_alerts.append({"Tip": "SAT", "Fon Kodu": item["code"], "Fon Adı": item.get("fund_title"), "Alan": item.get("investment_area"), "KAZRİSK Durumu": "🚨 2 GÜN TEYİTLİ ACİL SAT", "Son 2 Gün": f"{display_date(d1)} → {display_date(d2)}", "Son Skor": s2})
+            early_alerts.append({"Tip": "SAT", "Fon Kodu": item["code"], "Alan": item.get("investment_area"), "KAZRİSK Durumu": "🚨 2 GÜN TEYİTLİ ACİL SAT", "Son 2 Gün": f"{display_date(d1)} → {display_date(d2)}", "Son Skor": s2})
         elif lbl1 == "GÜÇLÜ AL" and lbl2 == "GÜÇLÜ AL":
-            early_alerts.append({"Tip": "AL", "Fon Kodu": item["code"], "Fon Adı": item.get("fund_title"), "Alan": item.get("investment_area"), "KAZRİSK Durumu": "🚀 2 GÜN TEYİTLİ GÜÇLÜ AL", "Son 2 Gün": f"{display_date(d1)} → {display_date(d2)}", "Son Skor": s2})
+            early_alerts.append({"Tip": "AL", "Fon Kodu": item["code"], "Alan": item.get("investment_area"), "KAZRİSK Durumu": "🚀 2 GÜN TEYİTLİ GÜÇLÜ AL", "Son 2 Gün": f"{display_date(d1)} → {display_date(d2)}", "Son Skor": s2})
 
 df_display = pd.DataFrame(display_rows)
 
@@ -1066,7 +857,7 @@ def color_cells(value):
 try: styled_df = df_display.style.map(color_cells)
 except AttributeError: styled_df = df_display.style.applymap(color_cells)
 
-st.subheader("📊 Analiz Sonuçları — Son 5 İşlem Günü Kararları (V14.2)")
+st.subheader("📊 Analiz Sonuçları — Son 5 İşlem Günü Kararları (V14.3)")
 st.dataframe(styled_df, use_container_width=True, hide_index=True)
 
 # ============================================================
@@ -1087,18 +878,18 @@ if sell_alerts or buy_alerts:
         if buy_alerts: st.dataframe(pd.DataFrame(buy_alerts), use_container_width=True, hide_index=True)
         else: st.success("Şu an teyitli 'Güçlü Al' fırsatı veren fon yok.")
 
-st.success(f"✅ V14.2 Analiz tamamlandı. Toplam {len(eligible)} fon işlendi.")
+st.success(f"✅ V14.3 Analiz tamamlandı. Toplam {len(calc_funds)} fon işlendi.")
 st.download_button(
-    label="📥 KAZRİSK V14.2 Excel İndir",
+    label="📥 KAZRİSK V14.3 Excel İndir",
     data=output,
-    file_name="fonlar_KGDM3_KAZRISK_FINAL_V14_2.xlsx",
+    file_name="fonlar_KGDM3_KAZRISK_FINAL_V14_3.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
 
 if SHOW_DIAGNOSTICS:
     st.subheader("🔎 Veri Kaynağı Tanılaması & Gemini AI Modu")
     diagnostic_rows = []
-    for item in eligible:
+    for item in calc_funds:
         reason = item.get("sentiment_ai_reason", "Bilinmiyor")
         ai_status = "🟢 Aktif (Canlı API)" if item.get("sentiment_ai_active") else f"🔴 Pasif ({reason})"
         for status in item.get("source_statuses", []):
@@ -1108,8 +899,6 @@ if SHOW_DIAGNOSTICS:
                 "Denendi": "Evet" if status.get("attempted") else "Hayır",
                 "Başarılı": "Evet" if status.get("ok") else "Hayır",
                 "HTTP": status.get("status_code"),
-                "Hata": status.get("error_type"),
-                "Süre ms": status.get("elapsed_ms"),
                 "Mesaj": status.get("message"),
                 "Gemini AI Modu": ai_status
             })
