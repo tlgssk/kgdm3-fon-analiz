@@ -203,7 +203,6 @@ def safe_float(value, default=0.0) -> float:
     except: return default
 
 def optional_float(value) -> Optional[float]:
-    """Eksik sayısal veriyi 0 ile karıştırmadan güvenli biçimde döndürür."""
     try:
         if value is None or (isinstance(value, str) and not value.strip()):
             return None
@@ -213,7 +212,6 @@ def optional_float(value) -> Optional[float]:
         return None
 
 def normalize_date_key(value) -> Optional[str]:
-    """Tüm tarihleri YYYY-MM-DD anahtarına normalize eder."""
     try:
         ts = pd.to_datetime(value, errors="coerce")
         if pd.isna(ts):
@@ -522,7 +520,7 @@ def fetch_isyatirim_series(fund_code: str):
             df["aum"], df["investors"] = None, None
             df = df.dropna(subset=["date", "price"])
             df = df[df["price"] > 0].sort_values("date").drop_duplicates(subset=["date"], keep="last").tail(TARGET_TRADING_DAYS + 1).reset_index(drop=True)
-            if len(df) >= 2: return df, status
+            if len(df) >= 2: return df[["date", "price", "aum", "investors"]], status
         except: pass
     return None, status
 
@@ -1080,13 +1078,23 @@ def create_excel_output(wb, ws_list, all_funds, common_n_days):
             elif "DÜZELTME" in text: cell.font = yellow_font
             elif "ACİL SAT" in text or "YETERSİZ" in text: cell.font = red_font
 
-    score_cols = [idx for name, idx in header_index.items() if "Skor" in name]
-    for col_idx in score_cols:
-        col_letter = get_column_letter(col_idx)
-        rng = f"{col_letter}2:{col_letter}{ws_scores.max_row}"
-        ws_scores.conditional_formatting.add(rng, CellIsRule(operator="greaterThanOrEqual", formula=["75"], fill=PatternFill(start_color=COLOR_LIGHT_GREEN, fill_type="solid")))
-        ws_scores.conditional_formatting.add(rng, CellIsRule(operator="between", formula=["50", "74"], fill=PatternFill(start_color=COLOR_LIGHT_YELLOW, fill_type="solid")))
-        ws_scores.conditional_formatting.add(rng, CellIsRule(operator="lessThan", formula=["50"], fill=PatternFill(start_color=COLOR_LIGHT_RED, fill_type="solid")))
+    # GÜVENLİ KOŞULLU BİÇİMLENDİRME (Python 3.12 / 3.13 / 3.14 + OpenPyXL Uyumlu)
+    if ws_scores.max_row >= 2:
+        score_cols = [idx for name, idx in header_index.items() if "Skor" in name]
+        for col_idx in score_cols:
+            col_letter = get_column_letter(col_idx)
+            rng = f"{col_letter}2:{col_letter}{ws_scores.max_row}"
+            try:
+                rule_green = CellIsRule(operator="greaterThanOrEqual", formula=["75"], fill=PatternFill(start_color=COLOR_LIGHT_GREEN, fill_type="solid"))
+                rule_yellow = CellIsRule(operator="between", formula=["50", "74"], fill=PatternFill(start_color=COLOR_LIGHT_YELLOW, fill_type="solid"))
+                rule_red = CellIsRule(operator="lessThan", formula=["50"], fill=PatternFill(start_color=COLOR_LIGHT_RED, fill_type="solid"))
+                
+                ws_scores.conditional_formatting.add(str(rng), rule_green)
+                ws_scores.conditional_formatting.add(str(rng), rule_yellow)
+                ws_scores.conditional_formatting.add(str(rng), rule_red)
+            except Exception:
+                # Koşullu formatlama kütüphane kaynaklı hata verirse dosya üretimini kesintiye uğratmaz
+                pass
 
     cur_col, int_col = header_index.get("AUM (₺)"), header_index.get("Yatırımcı")
     pct_cols = [
@@ -1143,7 +1151,6 @@ if input_method == "✍️ Manuel Fon Girişi (+ / Virgül / Boşluk)":
         req_codes = [normalize_fund_code(t) for t in raw_tokens if t.strip()]
         req_codes = list(dict.fromkeys(filter(None, req_codes)))
         
-        # Sanal Excel nesnesi üret
         wb = openpyxl.Workbook()
         ws_list = wb.active
         ws_list.title = "Fon_Listesi"
