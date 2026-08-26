@@ -9,3 +9,11 @@ tefas
 webdriver_manager
 google-genai
 urllib3
+streamlit
+pandas
+openpyxl
+requests
+cloudscraper
+tefas
+pytefas
+google-genai
