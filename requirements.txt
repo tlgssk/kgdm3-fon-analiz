@@ -9,3 +9,4 @@ tefas
 webdriver_manager
 google-genai
 urllib3
+yfinance
